@@ -1,1 +1,1 @@
-# hermes-personalize
+# Nous Hermes agent on AWS
