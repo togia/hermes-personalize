@@ -1,0 +1,39 @@
+name: Keep draw.io export synchronized
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**.drawio"
+      - .github/workflows/drawio-export.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: drawio-export-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drawio-export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Export draw.io files to SVG
+        uses: rlespinasse/drawio-export-action@v2
+        with:
+          path: .
+          output: export
+          format: svg
+          remove-page-suffix: true
+
+      - name: Commit and push generated SVGs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: automated draw.io export [skip ci]"
+          file_pattern: "export/*.svg"
