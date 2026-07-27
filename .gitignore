@@ -217,6 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Local Claude configuration
+/.claude/
+
 # Terraform
 **/.terraform/*
 *.tfstate

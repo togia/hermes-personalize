@@ -56,7 +56,7 @@ You (SSH, your IP only)
      11 nines durability, cross-AZ)
 ```
 
-See `infra-diagram.drawio` for the visual version of this.
+See `docs/infra.drawio` for the visual version of this.
 
 ## Components and rationale
 

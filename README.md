@@ -1,11 +1,11 @@
 # Nous Hermes agent on AWS
 
-![Infrastructure diagram](./export/infra-diagram.svg)
+![Infrastructure diagram](./export/infra.svg)
 
 ## Viewing the infra diagram in VS Code
 
 1. Install the [Draw.io Integration](https://marketplace.visualstudio.com/items?itemName=hediet.vscode-drawio) extension (`hediet.vscode-drawio`).
-2. Open `infra-diagram.drawio` — it renders and edits directly in the editor tab.
+2. Open `docs/infra.drawio` — it renders and edits directly in the editor tab.
 
 The diagram preview is generated automatically from the source file by GitHub Actions.
 
