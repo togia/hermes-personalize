@@ -15,6 +15,22 @@ The diagram preview is generated automatically from the source file by GitHub Ac
 that calls the OpenRouter API, with its long-term memory on a separate encrypted EBS
 volume, daily snapshots, and everything locked down to your IP.
 
+Terraform loads these files together as one module; the diagram below shows how
+values and resource references flow between them:
+
+```text
+terraform.tfvars.example ──copy/edit──> terraform.tfvars (local, ignored)
+TF_VAR_openrouter_api_key ────────────> environment variable (secret)
+                                           │
+                                           ▼
+                                      variables.tf ──inputs──> main.tf ──> outputs.tf
+                                                                  │             │
+versions.tf ──Terraform/AWS provider config─────────────────────┘             └─ IDs, IP, SSH command
+                                                                  │
+                                                                  └─ AWS resources: network, IAM, secret,
+                                                                     EC2, EBS, backups, and budget
+```
+
 | File | Contents |
 |---|---|
 | `versions.tf` | Terraform/provider version pins (`hashicorp/aws ~> 5.0`) |
