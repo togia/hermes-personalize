@@ -36,5 +36,5 @@ jobs:
       - name: Commit and push generated SVGs
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: automated draw.io export [skip ci]"
+          commit_message: "Chore: automated draw.io export [skip ci]"
           file_pattern: "export/*.svg"
