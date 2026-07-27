@@ -1,6 +1,6 @@
 # Nous Hermes agent on AWS
 
-![Infrastructure diagram](./export/infra.svg)
+![Infrastructure diagram](./docs/export/infra.svg)
 
 ## Viewing the infra diagram in VS Code
 
