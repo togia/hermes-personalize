@@ -37,4 +37,4 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Chore: Export draw.io to svg via CI/CD"
-          file_pattern: "export/*.svg"
+          file_pattern: "docs/export/*.svg"
