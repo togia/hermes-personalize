@@ -24,24 +24,24 @@ You (SSH, your IP only)
   Internet Gateway
         │
         ▼
-┌───────────────────────────────────────────┐
-│ VPC (default), public subnet               │
-│                                             │
-│  ┌───────────────────────────────────────┐ │        ┌──────────────────────┐
-│  │ EC2 t4g.micro (Graviton, ARM)         │ │──────▶ │ OpenRouter API       │
-│  │ - Hermes personalize agent process    │ │ HTTPS  │ (hosts Nous Hermes)  │
-│  │ - IAM instance role (least privilege) │ │ 443    └──────────────────────┘
-│  └───────────────────────────────────────┘ │
-│              │            │                 │
+┌──────────────────────────────────────────────┐
+│ VPC (default), public subnet                 │
+│                                              │
+│  ┌───────────────────────────────────────┐   │        ┌──────────────────────┐
+│  │ EC2 t4g.micro (Graviton, ARM)         │   │──────▶ │ OpenRouter API       │
+│  │ - Hermes personalize agent process    │   │ HTTPS  │ (hosts Nous Hermes)  │
+│  │ - IAM instance role (least privilege) │   │ 443    └──────────────────────┘
+│  └───────────────────────────────────────┘   │
+│              │            │                  │
 │              │ attached   │ reads secret     │
-│              ▼            ▼                 │
-│  ┌────────────────────┐ ┌────────────────┐  │
+│              ▼            ▼                  │
+│  ┌─────────────────────┐ ┌────────────────┐  │
 │  │ EBS gp3 volume      │ │ SSM Parameter  │  │
 │  │ 20 GB, encrypted    │ │ Store          │  │
 │  │ DeleteOnTermination │ │ SecureString:  │  │
 │  │ = false             │ │ OPENROUTER_KEY │  │
 │  │ (long-term memory)  │ └────────────────┘  │
-│  └────────────────────┘                      │
+│  └─────────────────────┘                     │
 │              │ daily snapshot                │
 │              ▼                               │
 │  ┌────────────────────┐                      │
@@ -131,10 +131,3 @@ This lands around **$4–14/month** depending on how much you leave it running, 
 cost-effective, while making it very hard to lose the data on the EBS volume short of
 deleting the AWS account itself.
 
-## Next steps (not yet done)
-
-This is a proposal only — nothing has been provisioned. If you'd like to proceed, I can:
-1. Write this as Terraform or CDK so it's reproducible and destroy/recreate-safe
-2. Or walk through provisioning it directly via the AWS CLI/console
-
-Let me know which you'd prefer before I create anything in your AWS account.
