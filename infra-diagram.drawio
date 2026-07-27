@@ -1,0 +1,91 @@
+<mxfile host="app.diagrams.net" modified="2026-07-27T00:00:00.000Z" agent="codex" version="24.0.0" type="device">
+  <diagram id="hermes-personalize-infra" name="Hermes Personalize Infra">
+    <mxGraphModel dx="1840" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Client and public entry point -->
+        <mxCell id="user" value="You&#10;SSH from your IP only" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=8;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="30" y="470" width="150" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="igw" value="Internet Gateway" style="shape=mxgraph.aws4.internet_gateway;fillColor=#8c4fff;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=13;fontStyle=1;spacingTop=7;html=1;" vertex="1" parent="1">
+          <mxGeometry x="250" y="455" width="110" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- AWS boundaries -->
+        <mxCell id="awscloud" value="AWS Account / Region (for example, us-east-1)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=12;fillColor=#f5f8fc;strokeColor=#1b4f72;strokeWidth=2;dashed=1;dashPattern=10 6;fontStyle=1;fontColor=#16191f;fontSize=15;" vertex="1" parent="1">
+          <mxGeometry x="430" y="50" width="1010" height="970" as="geometry" />
+        </mxCell>
+        <mxCell id="vpc" value="Default VPC (10.0.0.0/16)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=12;fillColor=#effaf4;strokeColor=#147e3f;strokeWidth=2;dashed=1;dashPattern=10 6;fontStyle=1;fontColor=#0b4f27;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="470" y="120" width="670" height="750" as="geometry" />
+        </mxCell>
+        <mxCell id="subnet" value="Public subnet (AZ-a)" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=12;fillColor=#ffffff;strokeColor=#147e3f;strokeWidth=2;fontColor=#0b4f27;fontStyle=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="510" y="180" width="590" height="630" as="geometry" />
+        </mxCell>
+
+        <!-- Security boundary -->
+        <mxCell id="sg" value="Security group  ·  SSH (22): my-ip/32 only  ·  HTTPS (443): outbound" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=8;fillColor=#fff3d6;strokeColor=#d05c00;strokeWidth=2;fontColor=#4d2700;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="540" y="245" width="530" height="62" as="geometry" />
+        </mxCell>
+
+        <!-- Workload and data services: AWS Architecture icons -->
+        <mxCell id="ec2" value="Amazon EC2&#10;t4g.micro · Hermes agent" style="shape=mxgraph.aws4.ec2;fillColor=#ed7100;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="570" y="370" width="160" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="ebs" value="Amazon EBS&#10;Encrypted gp3 memory" style="shape=mxgraph.aws4.elastic_block_store;fillColor=#3f8624;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="870" y="370" width="160" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="ssm" value="SSM Parameter Store&#10;SecureString API key" style="shape=mxgraph.aws4.parameter_store;fillColor=#e7157b;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="570" y="610" width="160" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="dlm" value="Amazon Data Lifecycle Manager" style="shape=mxgraph.aws4.elastic_block_store_amazon_data_lifecycle_manager;fillColor=#3f8624;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="870" y="610" width="160" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="cw" value="Amazon CloudWatch&#10;Optional logs" style="shape=mxgraph.aws4.cloudwatch;fillColor=#e7157b;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="570" y="835" width="160" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="budget" value="AWS Budgets&#10;$15/month alert" style="shape=mxgraph.aws4.budgets;fillColor=#e7157b;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="870" y="835" width="160" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Regional snapshot store and external model API -->
+        <mxCell id="s3" value="Amazon S3&#10;Snapshot storage" style="shape=mxgraph.aws4.s3;fillColor=#3f8624;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="1220" y="615" width="150" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="openrouter" value="OpenRouter API&#10;Nous Hermes inference" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=10;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1540" y="405" width="205" height="100" as="geometry" />
+        </mxCell>
+
+        <!-- Flows. Extra room between rows keeps routes and labels legible. -->
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="user" target="igw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="igw" target="ec2">
+          <mxGeometry relative="1" as="geometry"><mxPoint x="440" y="430" as="targetPoint" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="ec2" target="ebs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="ec2" target="ssm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="ebs" target="dlm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="dlm" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;dashPattern=5 5;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="ec2" target="cw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;dashPattern=5 5;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="cw" target="budget">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1b4f72;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="ec2" target="openrouter">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="1170" y="445" /><mxPoint x="1170" y="455" /></Array></mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
