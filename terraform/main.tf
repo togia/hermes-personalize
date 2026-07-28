@@ -301,60 +301,19 @@ resource "aws_launch_template" "agent" {
 
   # Runs on first boot of every instance the ASG ever launches — a replacement gets
   # a fresh root volume, so this is no longer a one-time thing the way it was for a
-  # single stop/start-able instance. It has two jobs: join Tailscale, and find +
-  # attach the persistent memory volume, which doesn't come with a new instance
-  # automatically the way it used to with a static Terraform-managed attachment.
-  user_data = base64encode(<<-EOT
-    #!/bin/bash
-    set -euxo pipefail
-
-    TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-    INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-
-    curl -fsSL https://tailscale.com/install.sh | sh
-    systemctl enable --now tailscaled
-
-    # IAM permissions can take a few seconds to propagate to a brand-new instance,
-    # so retry a handful of times rather than failing boot on the first attempt.
-    for i in $(seq 1 5); do
-      AUTH_KEY=$(aws ssm get-parameter \
-        --name "${aws_ssm_parameter.tailscale_auth_key.name}" \
-        --with-decryption \
-        --region "${var.aws_region}" \
-        --query "Parameter.Value" \
-        --output text) && break
-      sleep 5
-    done
-
-    # Use a reusable, ephemeral Tailscale auth key (both set in the Tailscale admin
-    # console when you generate it) — reusable because the ASG may relaunch from
-    # this same key more than once, ephemeral so a replaced instance's old node is
-    # pruned automatically instead of piling up as a dead entry in your tailnet.
-    tailscale up --authkey="$AUTH_KEY" --hostname="${var.project_name}-agent"
-
-    # The memory volume is a separate, persistent EBS volume that outlives any one
-    # instance, so it won't already be attached to this (possibly brand-new)
-    # instance — find it and attach it here. If the ASG is mid-replacement, the
-    # volume may still show attached to the instance being terminated for a few
-    # seconds; AWS auto-detaches non-root volumes on instance termination, so wait
-    # for that rather than force-detaching it ourselves.
-    for i in $(seq 1 12); do
-      STATE=$(aws ec2 describe-volumes \
-        --volume-ids "${aws_ebs_volume.memory.id}" \
-        --region "${var.aws_region}" \
-        --query "Volumes[0].State" \
-        --output text)
-      if [ "$STATE" = "available" ]; then
-        aws ec2 attach-volume \
-          --volume-id "${aws_ebs_volume.memory.id}" \
-          --instance-id "$INSTANCE_ID" \
-          --device /dev/sdf \
-          --region "${var.aws_region}" && break
-      fi
-      sleep 10
-    done
-  EOT
-  )
+  # single stop/start-able instance. Joins Tailscale, finds + attaches the persistent
+  # memory volume (which doesn't come with a new instance automatically the way it
+  # used to with a static Terraform-managed attachment), formats/mounts it on first
+  # use, then installs and starts the actual Telegram/OpenRouter agent process.
+  user_data = base64encode(templatefile("${path.module}/templates/user_data.sh.tpl", {
+    aws_region                = var.aws_region
+    auth_key_param_name       = aws_ssm_parameter.tailscale_auth_key.name
+    openrouter_key_param_name = aws_ssm_parameter.openrouter_key.name
+    telegram_token_param_name = aws_ssm_parameter.telegram_bot_token.name
+    openrouter_model          = var.openrouter_model
+    project_name              = var.project_name
+    memory_volume_id          = aws_ebs_volume.memory.id
+  }))
 
   tag_specifications {
     resource_type = "instance"

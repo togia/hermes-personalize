@@ -64,6 +64,12 @@ variable "tailscale_auth_key" {
   sensitive   = true
 }
 
+variable "openrouter_model" {
+  description = "OpenRouter model slug the agent calls for chat completions — a Nous Hermes variant by default. See https://openrouter.ai/models for the current catalog, context length, and pricing before changing this."
+  type        = string
+  default     = "nousresearch/hermes-3-llama-3.1-405b"
+}
+
 variable "budget_limit_usd" {
   description = "Monthly AWS Budget alert threshold in USD."
   type        = number

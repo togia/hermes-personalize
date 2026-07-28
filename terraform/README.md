@@ -41,8 +41,9 @@ values and resource references flow between them:
 | File | Contents |
 |---|---|
 | `versions.tf` | Terraform/provider version pins (`hashicorp/aws ~> 5.0`) |
-| `variables.tf` | Inputs: EC2 key pair name, instance/volume sizing, OpenRouter key / Telegram bot token / Tailscale auth key (all sensitive), budget alert email, etc. No IP variable — there's no IP-locked rule left to configure. |
-| `main.tf` | The resources: security group with **no ingress rules**, IAM instance role + SSM/KMS/CloudWatch/Session Manager permissions, SSM SecureStrings for the OpenRouter key/Telegram token/Tailscale auth key, EC2 instance (AL2023 arm64) with `user_data` that joins Tailscale on first boot, separate EBS volume + attachment for memory, DLM daily-snapshot policy, AWS Budget alert |
+| `variables.tf` | Inputs: EC2 key pair name, instance/volume sizing, OpenRouter key / Telegram bot token / Tailscale auth key (all sensitive), OpenRouter model slug, budget alert email, etc. No IP variable — there's no IP-locked rule left to configure. |
+| `main.tf` | The resources: security group with **no ingress rules**, IAM instance role + SSM/KMS/CloudWatch/Session Manager permissions, SSM SecureStrings for the OpenRouter key/Telegram token/Tailscale auth key, EC2 instance (AL2023 arm64) with `user_data` that joins Tailscale and installs the agent on first boot, separate EBS volume + attachment for memory, DLM daily-snapshot policy, AWS Budget alert |
+| `templates/user_data.sh.tpl` | The instance's first-boot script, rendered by `main.tf` via `templatefile()`: joins Tailscale, attaches/formats/mounts the memory volume at `/mnt/memory`, then installs and starts the `hermes-agent` systemd service — the actual Telegram-long-polling/OpenRouter process, at `/opt/hermes-agent/agent.py` on the instance. See [Step 4](../README.md#4-hermes-persistent-memory) and [Step 5](../README.md#5-connecting-with-telegram) in the top-level README for what it does at runtime. |
 | `outputs.tf` | Instance ID, public IP (outbound use only), instructions for finding the instance's Tailscale IP for SSH, a ready-to-use Session Manager fallback command, memory volume ID, SSM parameter names |
 | `terraform.tfvars.example` | Template for the values you need to fill in |
 | `.terraform.lock.hcl` | Provider version lock — commit this, it's not a secret |
@@ -67,6 +68,7 @@ values and resource references flow between them:
 | `root_volume_size_gb` | No (default `8`) | OS root volume size, holds the OS only, not agent memory. |
 | `data_volume_size_gb` | No (default `20`) | Size of the separate EBS volume that holds long-term agent memory. |
 | `snapshot_retention_days` | No (default `14`) | How many daily snapshots of the memory volume to retain. |
+| `openrouter_model` | No (default `nousresearch/hermes-3-llama-3.1-405b`) | OpenRouter model slug the agent calls for chat completions. Check [openrouter.ai/models](https://openrouter.ai/models) for the current catalog, context length, and pricing before changing this — OpenRouter's Hermes lineup changes over time. Changing it updates `user_data`, which only affects instances launched *after* the next `apply` (see the note on `templatefile()` changes and instance replacement above), not the currently running one. |
 | `budget_limit_usd` | No (default `15`) | Monthly AWS Budget alert threshold in USD. |
 | `enable_cloudwatch_logs` | No (default `true`) | Whether to create a CloudWatch Logs group for the agent process. |
 
@@ -99,6 +101,27 @@ values and resource references flow between them:
    ```
 
 `terraform.tfvars`, `*.tfstate`, and `.terraform/` are gitignored — never commit them.
+
+### Changing the agent script or `openrouter_model`
+
+`aws_launch_template.agent` reads `templates/user_data.sh.tpl` via `templatefile()`.
+Editing that script, or any variable it depends on (`openrouter_model`,
+`instance_type`, etc.), and running `terraform apply` creates a **new launch
+template version** — but doesn't touch the currently running instance.
+EC2 only reads `user_data` at boot, and Terraform doesn't force a running
+instance to reboot or get replaced just because the launch template it came
+from changed underneath it. Two ways to actually pick up the change:
+
+- **Wait for the next natural replacement** (ASG health-check failure, manual
+  termination) — it'll launch from the new version automatically.
+- **Force it now**: terminate the instance yourself
+  (`aws ec2 terminate-instances --instance-ids <id> --region <region>`) and let
+  the self-healing ASG (min=max=desired=1) relaunch it, or run
+  `aws autoscaling start-instance-refresh --auto-scaling-group-name <project_name>-asg --region <region>`
+  for a more controlled rollout.
+
+Either way, the memory volume and everything on it survives — only the
+instance (and its OS disk) gets replaced.
 
 ### If Terraform prompts you for a value interactively
 

@@ -264,10 +264,9 @@ Notes:
   [Tailscale ACLs](https://tailscale.com/kb/1018/acls) in the admin console,
   this is what replaces the security-group IP lock as the actual access-control
   layer.
-- The long-term memory volume is attached separately from the OS disk. On this
-  instance type it will typically show up as `/dev/nvme1n1` rather than
-  `/dev/sdf`; use `lsblk` or `nvme list` on the box to confirm, then mount it
-  (e.g. under `/mnt/memory`) before pointing the agent process at it.
+- The long-term memory volume is attached, formatted (on first boot only), and
+  mounted at `/mnt/memory` automatically by `user_data` — nothing manual
+  needed here. See Step 4 for what actually lives on it.
 
 **If Tailscale never comes up** (bad auth key, a transient failure in
 `user_data`, etc.), there's a fallback that doesn't depend on it or on any
@@ -284,52 +283,86 @@ way to check *why* Tailscale didn't come up: once in, check
 (or from your own machine, without needing any session at all:
 `aws ec2 get-console-output --instance-id <instance-id>`).
 
-## 4. Setting up Hermes persistent memory (planned)
+## 4. Hermes persistent memory
 
-> **Status: planned, not yet implemented.** The infrastructure to support this
-> (a separate encrypted EBS volume, `DeleteOnTermination=false`, daily snapshots
-> via DLM) is already provisioned by Terraform in Step 2. The agent process and
-> its memory layer itself have not been built yet.
+`user_data` (`terraform/templates/user_data.sh.tpl`) formats the memory volume
+on its first-ever boot only (later boots detect the existing filesystem and
+skip straight to mounting), then mounts it at `/mnt/memory`:
 
-The intended design, per [docs/infra.md](./docs/infra.md):
+- `/mnt/memory/conversations/<chat_id>.json` — one flat JSON file per Telegram
+  chat, holding the last 20 messages of that conversation. No database, no
+  vector store yet, just files — matching the "whatever your app uses" note in
+  [docs/infra.md](./docs/infra.md). Trimmed to bound both disk use and the size
+  (cost) of each OpenRouter request; if you want longer recall or semantic
+  search later, this is the piece to swap for a real store.
+- `/mnt/memory/telegram_offset.txt` — the last processed Telegram update ID,
+  so a restart doesn't reprocess (or skip) messages.
 
-1. Run the agent process on the EC2 instance, long-polling the Telegram Bot API
-   for new messages and calling the OpenRouter chat completions API for the
-   Nous Hermes model.
-2. Persist conversation history, and eventually embeddings for semantic recall
-   (a lightweight vector store or SQLite database), to the mounted memory
-   volume, not to the OS disk, so it survives instance replacement.
-3. Rely on the DLM daily-snapshot policy (retain 14 days by default) as the
-   safety net for that data; the memory volume itself is protected from
-   accidental deletion via `prevent_destroy` and EC2 termination protection.
+This survives instance replacement (the whole reason it's a separate volume,
+not part of the OS disk — see Step 2/`docs/infra.md`), and the DLM daily
+snapshot policy (retain 14 days by default) is the safety net on top of that.
 
-This section will be filled in with concrete setup steps once the agent process
-and memory layer are implemented.
+## 5. Connecting with Telegram
 
-## 5. Connecting with Telegram (planned)
+The agent (`terraform/templates/user_data.sh.tpl`, installed to
+`/opt/hermes-agent/agent.py` and run as the `hermes-agent` systemd service)
+does exactly what [docs/infra.md](./docs/infra.md) specifies: **long polling**,
+not a webhook. It calls Telegram's `getUpdates` endpoint from inside the
+instance, which holds the connection open and returns as soon as a message
+arrives (or times out and gets called again). This is a deliberate choice over
+Telegram's alternative webhook mode (`setWebhook`): long polling is entirely
+outbound-initiated, so it needs no public HTTP endpoint, no inbound security
+group rule, and no load balancer or API Gateway in front of the instance — it
+fits the "no ingress at all" design with zero additional infrastructure.
 
-> **Status: planned, not yet implemented.** The Tailscale/no-ingress networking
-> this relies on is already provisioned by Terraform; the agent process itself
-> (the thing that actually calls Telegram and OpenRouter) has not been built
-> yet. The bot token itself was already created and handed to Terraform back in
-> Step 1 — nothing further to set up on the Telegram side until the agent
-> process exists.
+For each incoming message, the agent loads that chat's history from
+`/mnt/memory` (Step 4), sends it plus the new message to OpenRouter
+(`openrouter_model` in `terraform.tfvars`, a Nous Hermes variant by default —
+see [terraform/README.md](./terraform/README.md#variables) to change it),
+and replies on Telegram with the model's response.
 
-The intended design is **long polling**, not a webhook: the agent process calls
-Telegram's `getUpdates` endpoint from inside the instance, which holds the
-connection open and returns as soon as a message arrives (or times out and gets
-called again). This is a deliberate choice over Telegram's alternative webhook
-mode (`setWebhook`): long polling is entirely outbound-initiated, so it needs no
-public HTTP endpoint, no inbound security group rule, and no load balancer or
-API Gateway in front of the instance, it fits the "no ingress at all" design
-described above with zero additional infrastructure.
+**To use it**: message your bot on Telegram (the one you created with
+[@BotFather](https://t.me/BotFather) in Step 1) directly — nothing further to
+configure, the `telegram_bot_token` from Step 1/Step 2 is already wired up.
 
-Once the agent process exists, the only remaining step is pointing its polling
-loop at the `telegram_bot_token` already sitting in SSM Parameter Store from
-Step 1/Step 2 — no further infrastructure changes needed. If you want WhatsApp
-instead of (or alongside) Telegram, see [Step 6](#6-possible-upgrades) below,
-WhatsApp's Cloud API requires a webhook, so it needs a bit more infrastructure
-than Telegram does.
+**To check on it**, over SSH or Session Manager (Step 3):
+
+1. **Is it running?**
+   ```bash
+   sudo systemctl status hermes-agent
+   ```
+   Look for `Active: active (running)` and a recent `Main PID`.
+2. **Watch it live** — leave this running, then message your bot from your
+   phone and watch a new line appear as it processes the update:
+   ```bash
+   sudo journalctl -u hermes-agent -f
+   ```
+3. **Check recent history** without needing to catch it live:
+   ```bash
+   sudo journalctl -u hermes-agent --since "10 minutes ago"
+   ```
+   A clean start logs one line like
+   `hermes-agent starting, offset=0, model=nousresearch/hermes-3-llama-3.1-405b`.
+   Repeated `getUpdates failed: ...` or `OpenRouter call failed: ...` lines
+   instead usually mean a bad/expired key, not a broken process — a bad
+   OpenRouter key, an invalid `openrouter_model` slug, or a Telegram token
+   typo all surface as errors here rather than a failed boot, since the
+   service itself starts fine either way and `Restart=always` keeps it
+   retrying, per `terraform/templates/user_data.sh.tpl`.
+4. **Confirm memory is actually being written** — after messaging the bot
+   once:
+   ```bash
+   ls /mnt/memory/conversations/
+   cat /mnt/memory/conversations/*.json
+   ```
+   One JSON file per Telegram chat ID, holding your message and the model's
+   reply.
+5. **The real test**: message your bot on Telegram and see if it replies —
+   everything above is diagnostic if it doesn't.
+
+If you want WhatsApp instead of (or alongside) Telegram, see
+[Step 6](#6-possible-upgrades) below — WhatsApp's Cloud API requires a webhook,
+so it needs a bit more infrastructure than Telegram does.
 
 ## 6. Possible upgrades
 

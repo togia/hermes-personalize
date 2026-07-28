@@ -1,6 +1,6 @@
 <mxfile host="65bd71144e">
     <diagram id="hermes-personalize-infra" name="Hermes Personalize Infra">
-        <mxGraphModel dx="550" dy="246" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1200" math="0" shadow="0">
+        <mxGraphModel dx="847" dy="814" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1200" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -57,11 +57,6 @@
                 </mxCell>
                 <mxCell id="openrouter-icon" parent="1" style="ellipse;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;fillColor=#6366f1;strokeColor=none;" value="" vertex="1">
                     <mxGeometry height="40" width="40" x="1372" y="220" as="geometry"/>
-                </mxCell>
-                <mxCell id="gSGJRROAyIdvzq2PZIuQ-3" edge="1" parent="1" source="telegram" style="edgeStyle=none;html=1;">
-                    <mxGeometry relative="1" as="geometry">
-                        <mxPoint x="1440" y="420" as="targetPoint"/>
-                    </mxGeometry>
                 </mxCell>
                 <mxCell id="tailscale-icon" parent="1" style="ellipse;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;fillColor=#1a1a2e;strokeColor=none;" value="" vertex="1">
                     <mxGeometry height="40" width="40" x="1372" y="480" as="geometry"/>
