@@ -18,29 +18,32 @@ below).
 ## Proposed architecture
 
 ```
-You (SSH, your IP only)
-        │
-        ▼
-  Internet Gateway
-        │
-        ▼
-┌──────────────────────────────────────────────┐
-│ VPC (default), public subnet                 │
-│                                              │
-│  ┌───────────────────────────────────────┐   │        ┌──────────────────────┐
-│  │ EC2 t4g.micro (Graviton, ARM)         │   │──────▶ │ OpenRouter API       │
-│  │ - Hermes personalize agent process    │   │ HTTPS  │ (hosts Nous Hermes)  │
-│  │ - IAM instance role (least privilege) │   │ 443    └──────────────────────┘
-│  └───────────────────────────────────────┘   │
+You (laptop + phone)                    Telegram Bot API   Tailscale
+via Tailscale — stable private IP       (long polling)     (coordination + DERP relay)
+        │                                      ▲                  ▲
+        │ encrypted tunnel                     │ outbound         │ outbound
+        ▼ (no inbound rule needed)             │ 443              │ 443/UDP 41641
+  Internet Gateway                             │                  │
+        │                                      │                  │
+        ▼                                      │                  │
+┌──────────────────────────────────────────────┼──────────────────┼───┐
+│ VPC (default), public subnet                 │                  │   │
+│                                              │                  │   │
+│  ┌───────────────────────────────────────┐   │                  │   │
+│  │ EC2 t4g.micro (Graviton, ARM)         │───┴──────────────────┘   │
+│  │ - Hermes personalize agent process    │──────▶ ┌──────────────────────┐
+│  │ - IAM instance role (least privilege) │  HTTPS │ OpenRouter API       │
+│  │ - SG: no ingress rules at all         │  443   │ (hosts Nous Hermes)  │
+│  └───────────────────────────────────────┘        └──────────────────────┘
 │              │            │                  │
-│              │ attached   │ reads secret     │
+│              │ attached   │ reads secrets    │
 │              ▼            ▼                  │
-│  ┌─────────────────────┐ ┌────────────────┐  │
-│  │ EBS gp3 volume      │ │ SSM Parameter  │  │
-│  │ 20 GB, encrypted    │ │ Store          │  │
-│  │ DeleteOnTermination │ │ SecureString:  │  │
-│  │ = false             │ │ OPENROUTER_KEY │  │
-│  │ (long-term memory)  │ └────────────────┘  │
+│  ┌─────────────────────┐ ┌─────────────────────────┐
+│  │ EBS gp3 volume      │ │ SSM Parameter Store     │
+│  │ 20 GB, encrypted    │ │ SecureStrings:          │
+│  │ DeleteOnTermination │ │ OpenRouter, Telegram,   │
+│  │ = false             │ │ Tailscale auth key      │
+│  │ (long-term memory)  │ └─────────────────────────┘
 │  └─────────────────────┘                     │
 │              │ daily snapshot                │
 │              ▼                               │
@@ -56,6 +59,8 @@ You (SSH, your IP only)
      11 nines durability, cross-AZ)
 ```
 
+The instance still has a public IP and sits in a public subnet — that hasn't changed. What's different is that the security group has **no ingress rules at all**. Every arrow into the instance in this diagram (Tailscale, Telegram, OpenRouter responses) is actually the *return* leg of a connection the instance itself initiated outbound; nothing external ever opens a new connection in. That's what makes it possible to skip a load balancer, API Gateway, and NAT Gateway entirely, there's no inbound path to route, terminate, or protect.
+
 See `docs/infra.drawio` for the visual version of this.
 
 ## Components and rationale
@@ -65,10 +70,13 @@ See `docs/infra.drawio` for the visual version of this.
 | Compute | EC2 **t4g.micro** (2 vCPU burstable, 1 GiB RAM, Graviton/ARM) | Cheapest instance class that reliably runs a small Python/Node process + light memory store. Graviton is ~20% cheaper than equivalent x86 (t3) for this workload. If your memory store grows (e.g. a real vector DB like Chroma/Qdrant instead of flat files), bump to **t4g.small** (2 GiB RAM) — see cost table. |
 | Storage | EBS **gp3**, 20 GB, encrypted | gp3 is cheaper than gp2 at the same performance and includes 3,000 IOPS / 125 MB/s baseline free — far more than a personal agent needs. Encryption is free and should always be on for anything holding your personal data/memories. |
 | Durability of memory | 1) `DeleteOnTermination=false` on the volume, 2) EC2 **termination protection** enabled, 3) **Data Lifecycle Manager (DLM)** daily automated snapshot policy, retain 14 | This is the core requirement — "never lose the memories." EBS volumes already have 99.999% durability via in-AZ replication, but that doesn't protect against *you* accidentally terminating the instance or deleting the volume, or the volume being deleted, or logical/application-level corruption. Snapshots (stored in S3, 11 nines durability) are the actual safety net for those cases and let you roll back to any of the last 14 days. `DeleteOnTermination=false` + termination protection are cheap insurance against the single most common way people lose an EBS volume: killing the instance without realizing the attached volume goes with it by default. |
-| Secrets | **SSM Parameter Store**, SecureString, for the OpenRouter API key | Free (vs. Secrets Manager's ~$0.40/secret/month) and perfectly adequate for a single personal API key. KMS-encrypted at rest, fetched by the instance role at runtime — never hardcoded. |
-| IAM | Dedicated instance role, scoped to: `ssm:GetParameter` on that one parameter, `cloudwatch:PutMetricData`/logs if you want monitoring, nothing else | Least privilege — if the instance is ever compromised, the blast radius is one parameter, not your account. |
-| Networking | Default VPC, public subnet, **no Elastic IP** (auto-assigned public IP instead) | Since Feb 2024 AWS charges ~$0.005/hr for *every* public IPv4, whether it's an Elastic IP or an auto-assigned one. Using auto-assign instead of an EIP means you pay $0 for the address while the instance is **stopped**, which matters if you adopt the stop/start cost optimization below. Trade-off: the public IP changes each time you stop/start. Fine for personal use (check it in the console, or point a cheap dynamic-DNS/Route 53 record at it). |
-| Security Group | Inbound: SSH (22) from **your IP /32 only**. Any app port you expose, also restricted to your IP. Outbound: 443 to anywhere (needed to reach OpenRouter). | Minimizes attack surface — this is a personal box, it should not be reachable from the internet at large. |
+| Secrets | **SSM Parameter Store**, SecureString, for the OpenRouter API key, Telegram bot token, and Tailscale auth key | Free (vs. Secrets Manager's ~$0.40/secret/month) and perfectly adequate for a handful of personal secrets. KMS-encrypted at rest, fetched by the instance role at runtime — never hardcoded. |
+| IAM | Dedicated instance role, scoped to: `ssm:GetParameter` on those three parameters, `kms:Decrypt` on the default SSM key, `cloudwatch:PutMetricData`/logs if you want monitoring, nothing else | Least privilege — if the instance is ever compromised, the blast radius is three parameters, not your account. |
+| Networking | Default VPC, public subnet, **no Elastic IP** (auto-assigned public IP instead) | Since Feb 2024 AWS charges ~$0.005/hr for *every* public IPv4, whether it's an Elastic IP or an auto-assigned one. Using auto-assign instead of an EIP means you pay $0 for the address while the instance is **stopped**, which matters if you adopt the stop/start cost optimization below. Trade-off: the public IP changes each time you stop/start — this no longer matters for admin access (see Tailscale below), and it never mattered for outbound calls, which don't care what the address is. |
+| Security Group | **No ingress rules at all.** Outbound: 443 (OpenRouter, Telegram, Tailscale coordination, SSM), 53/UDP (DNS), 41641/UDP (Tailscale direct connections, optional). | Nothing external can open a new connection to this instance, full stop. Admin access and messaging both ride on connections the instance itself initiates outbound (see Tailscale and Telegram rows), so there's nothing to open inbound and no load balancer, API Gateway, or NAT Gateway needed to front it. |
+| Remote admin access | **Tailscale**, installed via `user_data` on first boot, joins the instance to your private tailnet using an auth key from SSM. You SSH to the instance's stable Tailscale IP instead of its (changing) public IP. | Solves both the "my IP changes when I travel" problem (no more editing a CIDR variable and re-applying Terraform every time you're on a new network) and the "don't expose SSH to the internet" problem, at the same time, for free. Tailscale's own ACLs (configured in the Tailscale admin console, not in this Terraform) should restrict which of your devices can reach this node. |
+| Admin access fallback | **AWS Systems Manager Session Manager** (`aws ssm start-session`), IAM-only, no inbound rule | Covers the case where `user_data`'s Tailscale join never comes up (bad auth key, transient failure, etc.). It's a second path in, but not a second inbound rule — Session Manager uses an AWS-managed outbound channel, same "no ingress" property as Tailscale, just independent of whether Tailscale itself is healthy. |
+| Messaging integration | **Telegram Bot API with long polling**, not a webhook | The agent process calls `getUpdates` outbound; Telegram never initiates a connection to the instance. This is what avoids needing a public HTTP endpoint (and therefore an API Gateway/load balancer) at all. WhatsApp's Cloud API doesn't offer this option — it requires a webhook — which is why Telegram was chosen over it for this design; see the "possible upgrades" section in the top-level README if WhatsApp is wanted later. |
 
 ## Cost estimate (us-east-1, on-demand, approximate)
 
@@ -122,12 +130,16 @@ Start with:
 - **EC2 termination protection** enabled
 - **DLM daily snapshot policy**, retain 14 days
 - **No Elastic IP** — auto-assigned public IP only
-- **SSM Parameter Store** for the OpenRouter API key
-- **Security group locked to your IP**
+- **SSM Parameter Store** for the OpenRouter API key, Telegram bot token, and Tailscale auth key
+- **Security group with no ingress rules at all** — admin access via Tailscale, messaging via Telegram long polling, both outbound-initiated
 - An **AWS Budget alert** (free) set at, say, $15/month so you get notified before any
   surprise costs — cheap peace of mind on a personal project
 
 This lands around **$4–14/month** depending on how much you leave it running, comfortably
 cost-effective, while making it very hard to lose the data on the EBS volume short of
-deleting the AWS account itself.
+deleting the AWS account itself. Adding Tailscale and Telegram doesn't move this number —
+both are free at personal scale — which is the point: **this design is cheap and secure
+for the same reason**. Because there is no inbound path into the instance at all, there is
+also no load balancer, API Gateway, or NAT Gateway to pay for or to secure. Cost and attack
+surface shrink together here, not as a trade-off against each other.
 

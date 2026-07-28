@@ -21,6 +21,17 @@ data "aws_subnets" "default" {
   }
 }
 
+locals {
+  # Pinned to one subnet (and therefore one AZ) deliberately: the memory volume
+  # below lives in a single AZ and can't follow the ASG across AZs, so the ASG
+  # must only ever launch where that volume already is.
+  subnet_id = data.aws_subnets.default.ids[0]
+}
+
+data "aws_subnet" "selected" {
+  id = local.subnet_id
+}
+
 # --- AMI: Amazon Linux 2023, arm64, resolved via the public SSM parameter ---
 # so this always picks up the latest patched image without pinning an AMI ID.
 
@@ -32,19 +43,20 @@ data "aws_ssm_parameter" "al2023_arm64" {
 
 resource "aws_security_group" "agent" {
   name        = "${var.project_name}-sg"
-  description = "Personal Hermes agent host: SSH and outbound HTTPS only, all locked to one IP."
+  description = "Personal Hermes agent host: no inbound rules at all. Admin access goes over Tailscale's private mesh; messaging goes over Telegram long polling. Both are outbound-initiated, so there is nothing to open inbound."
   vpc_id      = data.aws_vpc.default.id
 
-  ingress {
-    description = "SSH from your IP only"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.my_ip_cidr]
-  }
+  # No ingress rules, intentionally. There is no SSH-from-my-IP rule, no webhook
+  # port, nothing. Admin access (SSH) rides over the tailscale0 interface once the
+  # instance joins the tailnet (see user_data below); Tailscale itself doesn't
+  # require an inbound security group rule to establish that tunnel — it either
+  # punches through via UDP or falls back to relaying through its DERP network,
+  # both of which look like outbound-initiated traffic from the instance's side.
+  # This is what makes the whole design avoid needing a load balancer, API Gateway,
+  # or NAT Gateway: there is no inbound path to protect or route in the first place.
 
   egress {
-    description = "HTTPS out to OpenRouter, SSM, etc."
+    description = "HTTPS out to OpenRouter, Telegram, Tailscale coordination, SSM, etc."
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
@@ -59,6 +71,18 @@ resource "aws_security_group" "agent" {
     to_port     = 53
     protocol    = "udp"
     cidr_blocks = [data.aws_vpc.default.cidr_block]
+  }
+
+  # Optional but recommended: lets Tailscale attempt a direct UDP connection instead
+  # of always relaying through DERP. Still egress-only, so it doesn't weaken the
+  # "no inbound" posture — if this is ever blocked, Tailscale just falls back to
+  # relaying over the 443 rule above and keeps working.
+  egress {
+    description = "Tailscale direct (UDP) connection attempts"
+    from_port   = 41641
+    to_port     = 41641
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   tags = local.tags
@@ -90,9 +114,13 @@ data "aws_kms_alias" "ssm" {
 
 data "aws_iam_policy_document" "agent_permissions" {
   statement {
-    sid       = "ReadOpenRouterKey"
-    actions   = ["ssm:GetParameter"]
-    resources = [aws_ssm_parameter.openrouter_key.arn]
+    sid     = "ReadSecrets"
+    actions = ["ssm:GetParameter"]
+    resources = [
+      aws_ssm_parameter.openrouter_key.arn,
+      aws_ssm_parameter.telegram_bot_token.arn,
+      aws_ssm_parameter.tailscale_auth_key.arn,
+    ]
   }
 
   statement {
@@ -105,6 +133,50 @@ data "aws_iam_policy_document" "agent_permissions" {
     sid       = "BasicMetrics"
     actions   = ["cloudwatch:PutMetricData"]
     resources = ["*"]
+  }
+
+  # Session Manager fallback: lets you get a shell via `aws ssm start-session`
+  # without any inbound security group rule, independent of whether the Tailscale
+  # join in user_data succeeds. These are the core actions the SSM Agent needs to
+  # register and open a session; none of them support resource-level scoping.
+  # (Deliberately not the AWS managed AmazonSSMManagedInstanceCore policy — that
+  # also grants S3/CloudWatch Logs access for session logging this project doesn't
+  # use, so this statement lists only what Session Manager itself requires.)
+  statement {
+    sid = "SessionManagerCore"
+    actions = [
+      "ssm:UpdateInstanceInformation",
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+      "ec2messages:AcknowledgeMessage",
+      "ec2messages:DeleteMessage",
+      "ec2messages:FailMessage",
+      "ec2messages:GetEndpoint",
+      "ec2messages:GetMessages",
+      "ec2messages:SendReply",
+    ]
+    resources = ["*"]
+  }
+
+  # Lets a freshly (re)launched instance find and attach the persistent memory
+  # volume itself. The ASG below can replace the instance at any time, and a
+  # statically-managed Terraform attachment can't follow a not-yet-known future
+  # instance ID, so this has to happen at runtime in user_data instead.
+  statement {
+    sid       = "DescribeVolumesForAttach"
+    actions   = ["ec2:DescribeVolumes"]
+    resources = ["*"] # DescribeVolumes doesn't support resource-level scoping
+  }
+
+  statement {
+    sid     = "AttachMemoryVolume"
+    actions = ["ec2:AttachVolume"]
+    resources = [
+      aws_ebs_volume.memory.arn,
+      "arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*",
+    ]
   }
 
   dynamic "statement" {
@@ -138,7 +210,7 @@ resource "aws_cloudwatch_log_group" "agent" {
   tags              = local.tags
 }
 
-# --- Secret: OpenRouter API key ---
+# --- Secrets: OpenRouter API key, Telegram bot token, Tailscale auth key ---
 
 resource "aws_ssm_parameter" "openrouter_key" {
   name        = "/${var.project_name}/openrouter-api-key"
@@ -154,35 +226,190 @@ resource "aws_ssm_parameter" "openrouter_key" {
   }
 }
 
-# --- Compute ---
+resource "aws_ssm_parameter" "telegram_bot_token" {
+  name        = "/${var.project_name}/telegram-bot-token"
+  description = "Telegram bot token used by the agent process to long-poll for updates."
+  type        = "SecureString"
+  value       = var.telegram_bot_token
+  tags        = local.tags
 
-resource "aws_instance" "agent" {
-  ami                    = data.aws_ssm_parameter.al2023_arm64.value
-  instance_type          = var.instance_type
-  subnet_id              = data.aws_subnets.default.ids[0]
-  vpc_security_group_ids = [aws_security_group.agent.id]
-  iam_instance_profile   = aws_iam_instance_profile.agent.name
-  key_name               = var.key_name
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "aws_ssm_parameter" "tailscale_auth_key" {
+  name        = "/${var.project_name}/tailscale-auth-key"
+  description = "Tailscale auth key used to join the instance to the tailnet on first boot."
+  type        = "SecureString"
+  value       = var.tailscale_auth_key
+  tags        = local.tags
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+# --- Compute: launch template + single-instance ASG for self-healing ---
+# A plain aws_instance has no way to notice its own host has crashed or gone
+# unreachable and relaunch itself — something outside it has to do that. An Auto
+# Scaling Group with min=max=desired=1 does exactly that; it's not here for
+# scaling out, it's a supervisor for one instance. This is why the memory volume
+# is pinned to one subnet/AZ (see locals.subnet_id above): it protects against
+# instance/host-level failures, not a full AZ outage — that would need the
+# memory itself to live somewhere shared (EFS, a database), not a single EBS
+# volume, which is a bigger change than this.
+
+resource "aws_launch_template" "agent" {
+  name_prefix   = "${var.project_name}-"
+  image_id      = data.aws_ssm_parameter.al2023_arm64.value
+  instance_type = var.instance_type
+  key_name      = var.key_name
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.agent.name
+  }
 
   # Auto-assigned public IP instead of an Elastic IP: costs $0 while the instance is
   # stopped, which is the whole point of the stop/start cost-saving pattern in infra.md.
-  # Trade-off: the public IP changes on every stop/start.
-  associate_public_ip_address = true
-
-  # Cheap insurance against the most common way people lose an EBS volume: terminating
-  # the instance without realizing the attached data volume goes with it by default.
-  disable_api_termination = true
-
-  root_block_device {
-    volume_type           = "gp3"
-    volume_size           = var.root_volume_size_gb
-    encrypted             = true
-    delete_on_termination = true # OS disk only — no memory lives here, safe to discard
+  # Trade-off: the public IP changes on every stop/start and on every ASG-driven
+  # replacement. This is fine here because nothing depends on it for inbound access —
+  # it's only used for the instance's own outbound calls (OpenRouter, Telegram,
+  # Tailscale, SSM), and admin access goes over the stable Tailscale IP instead.
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.agent.id]
+    delete_on_termination       = true
   }
 
-  tags = merge(local.tags, {
+  # Require IMDSv2 (token-based metadata requests). user_data below already uses
+  # the token flow, so this is a free hardening step, not a functional change.
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  block_device_mappings {
+    device_name = "/dev/xvda" # AL2023's registered root device name
+    ebs {
+      volume_type           = "gp3"
+      volume_size           = var.root_volume_size_gb
+      encrypted             = true
+      delete_on_termination = true # OS disk only — no memory lives here, safe to discard
+    }
+  }
+
+  # Runs on first boot of every instance the ASG ever launches — a replacement gets
+  # a fresh root volume, so this is no longer a one-time thing the way it was for a
+  # single stop/start-able instance. It has two jobs: join Tailscale, and find +
+  # attach the persistent memory volume, which doesn't come with a new instance
+  # automatically the way it used to with a static Terraform-managed attachment.
+  user_data = base64encode(<<-EOT
+    #!/bin/bash
+    set -euxo pipefail
+
+    TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+    INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+
+    curl -fsSL https://tailscale.com/install.sh | sh
+    systemctl enable --now tailscaled
+
+    # IAM permissions can take a few seconds to propagate to a brand-new instance,
+    # so retry a handful of times rather than failing boot on the first attempt.
+    for i in $(seq 1 5); do
+      AUTH_KEY=$(aws ssm get-parameter \
+        --name "${aws_ssm_parameter.tailscale_auth_key.name}" \
+        --with-decryption \
+        --region "${var.aws_region}" \
+        --query "Parameter.Value" \
+        --output text) && break
+      sleep 5
+    done
+
+    # Use a reusable, ephemeral Tailscale auth key (both set in the Tailscale admin
+    # console when you generate it) — reusable because the ASG may relaunch from
+    # this same key more than once, ephemeral so a replaced instance's old node is
+    # pruned automatically instead of piling up as a dead entry in your tailnet.
+    tailscale up --authkey="$AUTH_KEY" --hostname="${var.project_name}-agent"
+
+    # The memory volume is a separate, persistent EBS volume that outlives any one
+    # instance, so it won't already be attached to this (possibly brand-new)
+    # instance — find it and attach it here. If the ASG is mid-replacement, the
+    # volume may still show attached to the instance being terminated for a few
+    # seconds; AWS auto-detaches non-root volumes on instance termination, so wait
+    # for that rather than force-detaching it ourselves.
+    for i in $(seq 1 12); do
+      STATE=$(aws ec2 describe-volumes \
+        --volume-ids "${aws_ebs_volume.memory.id}" \
+        --region "${var.aws_region}" \
+        --query "Volumes[0].State" \
+        --output text)
+      if [ "$STATE" = "available" ]; then
+        aws ec2 attach-volume \
+          --volume-id "${aws_ebs_volume.memory.id}" \
+          --instance-id "$INSTANCE_ID" \
+          --device /dev/sdf \
+          --region "${var.aws_region}" && break
+      fi
+      sleep 10
+    done
+  EOT
+  )
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.tags, {
+      Name = "${var.project_name}-agent"
+    })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = local.tags
+  }
+
+  # Deliberately no disable_api_termination here, unlike the single-instance design
+  # this replaces: the whole point of the ASG is to terminate and replace an
+  # unhealthy instance automatically, and API termination protection would block
+  # exactly that. The memory volume's own prevent_destroy + delete_on_termination
+  # = false (below) is what actually protects your data, independent of this.
+}
+
+resource "aws_autoscaling_group" "agent" {
+  name                      = "${var.project_name}-asg"
+  min_size                  = 1
+  max_size                  = 1
+  desired_capacity          = 1
+  vpc_zone_identifier       = [local.subnet_id]
+  health_check_type         = "EC2"
+  health_check_grace_period = 300
+
+  launch_template {
+    id      = aws_launch_template.agent.id
+    version = "$Latest"
+  }
+
+  dynamic "tag" {
+    for_each = merge(local.tags, { Name = "${var.project_name}-agent" })
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+}
+
+# Looks up whichever instance the ASG currently has running, purely so the outputs
+# below can surface a usable instance ID/IP. Terraform doesn't otherwise expose a
+# single instance's attributes from an ASG, since ASG membership is dynamic and can
+# change (a health-check replacement) independently of any Terraform run.
+data "aws_instances" "agent" {
+  instance_tags = {
     Name = "${var.project_name}-agent"
-  })
+  }
+  instance_state_names = ["running"]
+
+  depends_on = [aws_autoscaling_group.agent]
 }
 
 # --- Storage: the actual long-term memory volume, kept separate from the OS disk ---
@@ -191,7 +418,7 @@ resource "aws_instance" "agent" {
 # survive `terraform destroy` of the instance, matching infra.md's DeleteOnTermination=false.
 
 resource "aws_ebs_volume" "memory" {
-  availability_zone = aws_instance.agent.availability_zone
+  availability_zone = data.aws_subnet.selected.availability_zone
   size              = var.data_volume_size_gb
   type              = "gp3"
   encrypted         = true
@@ -208,14 +435,12 @@ resource "aws_ebs_volume" "memory" {
   }
 }
 
-resource "aws_volume_attachment" "memory" {
-  # /dev/sdf is the conventional attach point Terraform/the API expects; on this
-  # Nitro-based instance type the OS will actually expose it as /dev/nvme1n1 or similar —
-  # use `nvme list` or check /dev/disk/by-id on the box rather than assuming /dev/xvdf.
-  device_name = "/dev/sdf"
-  volume_id   = aws_ebs_volume.memory.id
-  instance_id = aws_instance.agent.id
-}
+# No static aws_volume_attachment resource here anymore — with a plain aws_instance
+# it could reference a fixed instance_id, but the ASG above can replace that instance
+# at any time with one whose ID doesn't exist yet at plan time. Attachment happens at
+# runtime instead, in the launch template's user_data (device /dev/sdf, which this
+# Nitro-based instance type will expose as /dev/nvme1n1 or similar — use `nvme list`
+# or check /dev/disk/by-id on the box rather than assuming /dev/xvdf).
 
 # --- Snapshots: the actual safety net for the memory volume ---
 

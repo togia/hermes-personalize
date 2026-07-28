@@ -10,16 +10,6 @@ variable "project_name" {
   default     = "hermes-personalize"
 }
 
-variable "my_ip_cidr" {
-  description = "Your public IP in CIDR form (e.g. \"203.0.113.4/32\"). SSH and any exposed app port are locked to this."
-  type        = string
-
-  validation {
-    condition     = can(cidrnetmask(var.my_ip_cidr))
-    error_message = "my_ip_cidr must be a valid CIDR block, e.g. 203.0.113.4/32."
-  }
-}
-
 variable "key_name" {
   description = "Name of an existing EC2 key pair to use for SSH access."
   type        = string
@@ -55,6 +45,21 @@ variable "snapshot_retention_days" {
 # so rotating the key by hand in the console/CLI doesn't get clobbered on the next apply.
 variable "openrouter_api_key" {
   description = "OpenRouter API key, stored as a SecureString in SSM Parameter Store."
+  type        = string
+  sensitive   = true
+}
+
+# Same reasoning as openrouter_api_key above: never in tfvars or version control.
+# Pass via TF_VAR_telegram_bot_token at apply time.
+variable "telegram_bot_token" {
+  description = "Telegram bot token (from @BotFather), stored as a SecureString in SSM Parameter Store. The agent process uses this for long-polling updates, so no inbound webhook is needed."
+  type        = string
+  sensitive   = true
+}
+
+# Same reasoning again. Pass via TF_VAR_tailscale_auth_key at apply time.
+variable "tailscale_auth_key" {
+  description = "Tailscale auth key used to join the instance to your tailnet on first boot, stored as a SecureString in SSM Parameter Store. This is what gives the instance a stable private IP for admin access, replacing IP-locked SSH."
   type        = string
   sensitive   = true
 }
