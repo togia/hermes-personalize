@@ -37,3 +37,8 @@ output "tailscale_parameter_name" {
   description = "SSM Parameter Store name for the Tailscale auth key."
   value       = aws_ssm_parameter.tailscale_auth_key.name
 }
+
+output "brave_parameter_name" {
+  description = "SSM Parameter Store name for the Brave Search API key."
+  value       = aws_ssm_parameter.brave_api_key.name
+}

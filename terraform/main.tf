@@ -120,6 +120,7 @@ data "aws_iam_policy_document" "agent_permissions" {
       aws_ssm_parameter.openrouter_key.arn,
       aws_ssm_parameter.telegram_bot_token.arn,
       aws_ssm_parameter.tailscale_auth_key.arn,
+      aws_ssm_parameter.brave_api_key.arn,
     ]
   }
 
@@ -210,7 +211,7 @@ resource "aws_cloudwatch_log_group" "agent" {
   tags              = local.tags
 }
 
-# --- Secrets: OpenRouter API key, Telegram bot token, Tailscale auth key ---
+# --- Secrets: OpenRouter API key, Telegram bot token, Tailscale auth key, Brave Search API key ---
 
 resource "aws_ssm_parameter" "openrouter_key" {
   name        = "/${var.project_name}/openrouter-api-key"
@@ -243,6 +244,18 @@ resource "aws_ssm_parameter" "tailscale_auth_key" {
   description = "Tailscale auth key used to join the instance to the tailnet on first boot."
   type        = "SecureString"
   value       = var.tailscale_auth_key
+  tags        = local.tags
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "aws_ssm_parameter" "brave_api_key" {
+  name        = "/${var.project_name}/brave-api-key"
+  description = "Brave Search API key used by the agent's web_search tool."
+  type        = "SecureString"
+  value       = var.brave_api_key
   tags        = local.tags
 
   lifecycle {
@@ -310,6 +323,7 @@ resource "aws_launch_template" "agent" {
     auth_key_param_name       = aws_ssm_parameter.tailscale_auth_key.name
     openrouter_key_param_name = aws_ssm_parameter.openrouter_key.name
     telegram_token_param_name = aws_ssm_parameter.telegram_bot_token.name
+    brave_key_param_name      = aws_ssm_parameter.brave_api_key.name
     openrouter_model          = var.openrouter_model
     project_name              = var.project_name
     memory_volume_id          = aws_ebs_volume.memory.id

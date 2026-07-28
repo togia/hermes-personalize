@@ -113,10 +113,21 @@ for i in $(seq 1 5); do
   sleep 5
 done
 
+for i in $(seq 1 5); do
+  BRAVE_KEY=$(aws ssm get-parameter \
+    --name "${brave_key_param_name}" \
+    --with-decryption \
+    --region "${aws_region}" \
+    --query "Parameter.Value" \
+    --output text) && break
+  sleep 5
+done
+
 cat >/etc/hermes-agent.env <<EOF
 OPENROUTER_API_KEY=$OPENROUTER_KEY
 TELEGRAM_BOT_TOKEN=$TELEGRAM_TOKEN
 OPENROUTER_MODEL=${openrouter_model}
+BRAVE_API_KEY=$BRAVE_KEY
 MEMORY_DIR=$MEMORY_MOUNT
 EOF
 set -x
@@ -134,6 +145,7 @@ per the design in docs/infra.md — no database, just files on the persistent
 EBS volume, trimmed to the most recent messages to bound both disk use and
 the size (cost) of each OpenRouter request.
 """
+import datetime
 import json
 import os
 import time
@@ -143,14 +155,17 @@ import requests
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENROUTER_MODEL = os.environ["OPENROUTER_MODEL"]
+BRAVE_API_KEY = os.environ["BRAVE_API_KEY"]
 MEMORY_DIR = os.environ.get("MEMORY_DIR", "/mnt/memory")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
+BRAVE_SEARCH_API = "https://api.search.brave.com/res/v1/web/search"
 
 OFFSET_FILE = os.path.join(MEMORY_DIR, "telegram_offset.txt")
 CONVERSATIONS_DIR = os.path.join(MEMORY_DIR, "conversations")
 MAX_HISTORY_MESSAGES = 20
+MAX_TOOL_ROUNDS = 5  # bounds how many tool round-trips one reply can trigger
 SYSTEM_PROMPT = (
     "You are a helpful personal assistant, replying concisely over Telegram. "
     "This is a private, single-user conversation, and the full history of it is "
@@ -158,10 +173,142 @@ SYSTEM_PROMPT = (
     "feature or policy that erases or withholds anything the user has told you. "
     "Treat facts the user shares (their name for you, preferences, etc.) as "
     "durably remembered, and use them in later replies rather than claiming you "
-    "can't retain them."
+    "can't retain them. You have tools available (web_search, get_time, "
+    "get_weather) -- use them when they'd give a better answer than what you "
+    "already know, instead of guessing or saying you can't look things up. "
+    "Always use get_weather for weather questions, never web_search -- web "
+    "search results are generic page snippets that don't contain real forecast "
+    "numbers. If a place name is ambiguous (e.g. Athens could mean Athens, "
+    "Greece or Athens, Georgia), ask which one instead of guessing."
 )
 
 os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
+
+
+def web_search(query):
+    response = requests.get(
+        BRAVE_SEARCH_API,
+        headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
+        params={"q": query, "count": 5},
+        timeout=15,
+    )
+    response.raise_for_status()
+    results = response.json().get("web", {}).get("results", [])[:5]
+    if not results:
+        return "No results found."
+    return "\n".join(
+        f"- {r.get('title')}: {r.get('description', '')} ({r.get('url')})"
+        for r in results
+    )
+
+
+def get_time():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def get_weather(location):
+    geocode = requests.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": location, "count": 1},
+        timeout=15,
+    )
+    geocode.raise_for_status()
+    results = geocode.json().get("results")
+    if not results:
+        return f"Couldn't find a location matching '{location}'."
+    place = results[0]
+    label = ", ".join(
+        part for part in [place.get("name"), place.get("admin1"), place.get("country")] if part
+    )
+
+    forecast = requests.get(
+        "https://api.open-meteo.com/v1/forecast",
+        params={
+            "latitude": place["latitude"],
+            "longitude": place["longitude"],
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "timezone": "auto",
+            "forecast_days": 3,
+        },
+        timeout=15,
+    )
+    forecast.raise_for_status()
+    daily = forecast.json().get("daily", {})
+    dates = daily.get("time", [])
+    if not dates:
+        return f"No forecast data available for {label}."
+
+    lines = [f"Forecast for {label}:"]
+    for i, date in enumerate(dates):
+        lines.append(
+            f"- {date}: high {daily['temperature_2m_max'][i]}°C, "
+            f"low {daily['temperature_2m_min'][i]}°C, "
+            f"precipitation chance {daily['precipitation_probability_max'][i]}%"
+        )
+    return "\n".join(lines)
+
+
+TOOLS = {
+    "web_search": {
+        "schema": {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": (
+                    "Search the public web and return the top results (title, "
+                    "snippet, URL) for a query. Use this for current events, "
+                    "facts you're unsure of, or anything needing up-to-date "
+                    "information."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query."},
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        "fn": lambda query: web_search(query),
+    },
+    "get_time": {
+        "schema": {
+            "type": "function",
+            "function": {
+                "name": "get_time",
+                "description": "Get the current date and time (UTC).",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        "fn": lambda: get_time(),
+    },
+    "get_weather": {
+        "schema": {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": (
+                    "Get a real, structured 3-day weather forecast (high/low "
+                    "temperature in Celsius, precipitation chance) for a named "
+                    "location. Use this instead of web_search for any weather "
+                    "question -- web_search only returns generic page snippets "
+                    "that don't actually contain forecast numbers."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "City name, optionally with country, e.g. 'Athens, Greece'.",
+                        },
+                    },
+                    "required": ["location"],
+                },
+            },
+        },
+        "fn": lambda location: get_weather(location),
+    },
+}
 
 
 def load_offset():
@@ -193,22 +340,72 @@ def save_history(chat_id, history):
         json.dump(history[-MAX_HISTORY_MESSAGES:], f)
 
 
+def call_tool(name, arguments_json):
+    tool = TOOLS.get(name)
+    if tool is None:
+        return f"Unknown tool: {name}"
+    try:
+        args = json.loads(arguments_json or "{}")
+        return tool["fn"](**args)
+    except Exception as exc:
+        return f"Tool call failed: {exc}"
+
+
 def ask_openrouter(history, text):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(history)
     messages.append({"role": "user", "content": text})
-    response = requests.post(
-        OPENROUTER_API,
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "X-Title": "hermes-personalize",
-        },
-        json={"model": OPENROUTER_MODEL, "messages": messages},
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+
+    # Tool calls happen in-band with the model: it replies with tool_calls instead
+    # of content, we execute them locally (the model has no way to reach the
+    # network itself) and feed the results back, looping until it answers with
+    # plain content. MAX_TOOL_ROUNDS bounds this in case it keeps calling tools.
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = requests.post(
+            OPENROUTER_API,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "X-Title": "hermes-personalize",
+            },
+            json={
+                "model": OPENROUTER_MODEL,
+                "messages": messages,
+                "tools": [tool["schema"] for tool in TOOLS.values()],
+                # require_parameters alone isn't enough: some providers list
+                # "tools" as a supported parameter but don't reliably honor it
+                # (they echo the model's raw function-call attempt back as
+                # plain text content instead of a real tool_calls response).
+                # Measured empirically against this model -- groq, together,
+                # nebius, and google-vertex consistently returned real
+                # tool_calls; coreweave and deepinfra did not. Re-verify this
+                # list if OPENROUTER_MODEL changes.
+                "provider": {
+                    "require_parameters": True,
+                    "order": ["groq", "together", "nebius", "google-vertex", "novita"],
+                    "allow_fallbacks": False,
+                },
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        message = response.json()["choices"][0]["message"]
+
+        tool_calls = message.get("tool_calls")
+        if not tool_calls:
+            return message["content"]
+
+        messages.append(message)
+        for call in tool_calls:
+            result = call_tool(call["function"]["name"], call["function"]["arguments"])
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "name": call["function"]["name"],
+                "content": str(result),
+            })
+
+    return "Sorry, I couldn't finish that after several tool calls."
 
 
 def send_telegram_message(chat_id, text):

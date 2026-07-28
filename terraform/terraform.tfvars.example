@@ -3,8 +3,9 @@
 key_name           = "your-ec2-keypair-name"
 budget_alert_email = "you@example.com"
 
-# Do NOT put these three here — pass them at apply time instead:
+# Do NOT put these four here — pass them at apply time instead:
 #   TF_VAR_openrouter_api_key="sk-or-..." \
 #   TF_VAR_telegram_bot_token="123456:ABC-your-botfather-token" \
 #   TF_VAR_tailscale_auth_key="tskey-auth-..." \
+#   TF_VAR_brave_api_key="BSA..." \
 #   terraform apply

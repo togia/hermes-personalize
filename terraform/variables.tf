@@ -65,9 +65,17 @@ variable "tailscale_auth_key" {
 }
 
 variable "openrouter_model" {
-  description = "OpenRouter model slug the agent calls for chat completions — a Nous Hermes variant by default. See https://openrouter.ai/models for the current catalog, context length, and pricing before changing this."
+  description = "OpenRouter model slug the agent calls for chat completions. Defaults to meta-llama/llama-3.3-70b-instruct rather than a Nous Hermes model: as of writing, none of OpenRouter's Hermes endpoints support the \"tools\" parameter the agent's web_search/get_time tools rely on (verified via https://openrouter.ai/api/v1/models/nousresearch/hermes-3-llama-3.1-405b/endpoints), while Llama 3.3 70B does, was tuned by Meta to match Llama 3.1 405B's quality at a fraction of the cost, and is cheaper than Hermes 3 405B on both prompt and completion pricing. See https://openrouter.ai/models for the current catalog, context length, pricing, and per-model tool support before changing this."
   type        = string
-  default     = "nousresearch/hermes-3-llama-3.1-405b"
+  default     = "meta-llama/llama-3.3-70b-instruct"
+}
+
+# Same reasoning as the other three secrets above: never in tfvars or version control.
+# Pass via TF_VAR_brave_api_key at apply time. Used by the agent's web_search tool.
+variable "brave_api_key" {
+  description = "Brave Search API key, stored as a SecureString in SSM Parameter Store. Used by the agent's web_search tool. Get one at https://api.search.brave.com/app/keys (free tier: 2,000 queries/month)."
+  type        = string
+  sensitive   = true
 }
 
 variable "budget_limit_usd" {

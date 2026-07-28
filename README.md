@@ -56,10 +56,11 @@ is a single uninterrupted `terraform apply`.
 
 ## 1. Gather your accounts and keys
 
-Terraform needs an EC2 key pair name right away and three secrets
-(`openrouter_api_key`, `telegram_bot_token`, `tailscale_auth_key`) as
-environment variables at `apply` time. Get everything below ready now so
-Step 2 doesn't stall halfway through waiting on a sign-up page:
+Terraform needs an EC2 key pair name right away and four secrets
+(`openrouter_api_key`, `telegram_bot_token`, `tailscale_auth_key`,
+`brave_api_key`) as environment variables at `apply` time. Get everything
+below ready now so Step 2 doesn't stall halfway through waiting on a sign-up
+page:
 
 1. **AWS account with credentials configured locally.** Terraform's AWS
    provider uses your default credential chain (`aws configure`, SSO, or env
@@ -204,8 +205,13 @@ Step 2 doesn't stall halfway through waiting on a sign-up page:
    - Click **Generate key** and copy the result (starts with
      `tskey-auth-...`) somewhere safe immediately, Tailscale only shows it
      once.
+7. **A Brave Search API key.** Sign up at
+   [api.search.brave.com](https://api.search.brave.com/app/keys) and create a
+   key (free tier: 2,000 queries/month). This is used by the agent's
+   `web_search` tool — a plain HTTPS call the agent process itself makes, not
+   anything OpenRouter or Telegram-related.
 
-With all six in hand, move to Step 2.
+With all seven in hand, move to Step 2.
 
 ## 2. Provision the infrastructure
 
@@ -217,15 +223,31 @@ Every file, every variable, the full `init`/`plan`/`apply` command sequence,
 what to do if Terraform prompts you interactively for a secret, and how to
 rotate secrets afterward are all documented in
 [terraform/README.md](./terraform/README.md#usage) — follow that from here,
-using `key_name` and the three secrets gathered in Step 1 above. Once
+using `key_name` and the four secrets gathered in Step 1 above. Once
 `terraform apply` finishes, give the instance a minute to boot and join your
 tailnet before moving to Step 3.
 
 ## 3. Connect to the instance over Tailscale
 
-Admin access goes over [Tailscale](https://tailscale.com), not the instance's
-public IP. The instance joined your tailnet automatically during boot in Step 2
-(via the `user_data` script in `terraform/main.tf`, using the
+There are two independent ways to get a shell on the instance. Either works at
+any time; they don't depend on each other:
+
+| | SSH over Tailscale | AWS Systems Manager Session Manager |
+|---|---|---|
+| **Identifies the instance by** | its stable Tailscale IP/hostname | its EC2 instance ID |
+| **Authenticated by** | your SSH key pair (Step 1) | your AWS IAM credentials |
+| **Needs locally installed** | the Tailscale client | the [Session Manager plugin](#session-manager-plugin-not-found) for the AWS CLI |
+| **Still works if...** | Tailscale is healthy | Tailscale never came up, your `.pem` is lost, or you're on a machine with AWS CLI access but no Tailscale/key pair |
+| **Quick command** | `ssh -i ~/.ssh/<key>.pem ec2-user@<tailscale-ip>` | `aws ssm start-session --target $(terraform output -raw instance_id) --region <region>` |
+
+This is deliberate redundancy, not two ways to do the same thing badly: SSH
+over Tailscale is the everyday path, IAM-authenticated Session Manager is the
+one independent path in when Tailscale itself is what's broken (see "if
+Tailscale never comes up" below).
+
+Admin access primarily goes over [Tailscale](https://tailscale.com), not the
+instance's public IP. The instance joined your tailnet automatically during
+boot in Step 2 (via the `user_data` script in `terraform/main.tf`, using the
 `tailscale_auth_key` from Step 1), so:
 
 1. Install Tailscale on your own machine (laptop and/or phone) and sign in to
@@ -248,9 +270,9 @@ Notes:
   to authenticate rather than refusing the file, or the `.pem` is 0 bytes
   (`wc -c ~/.ssh/hermes-aws.pem`), the key material itself is missing or
   wrong — see the "lost the private key" note in Step 1, there's no way to
-  recover it, only to generate a new key pair. In the meantime, the [Session
-  Manager fallback](#3-connect-to-the-instance-over-tailscale) below still
-  works, since it doesn't depend on this key pair at all.
+  recover it, only to generate a new key pair. In the meantime, [Session
+  Manager](#if-tailscale-never-comes-up) below still works, since it doesn't
+  depend on this key pair at all.
 
 - The instance's public IP (`terraform output public_ip`) still exists and
   still changes on every stop/start, exactly as before, but it's no longer
@@ -268,13 +290,17 @@ Notes:
   mounted at `/mnt/memory` automatically by `user_data` — nothing manual
   needed here. See Step 4 for what actually lives on it.
 
-**If Tailscale never comes up** (bad auth key, a transient failure in
-`user_data`, etc.), there's a fallback that doesn't depend on it or on any
-inbound rule: [AWS Systems Manager Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html).
+### If Tailscale never comes up
+
+If it doesn't (a bad auth key, a transient failure in `user_data`, etc.),
+there's a fallback that doesn't depend on it or on any inbound rule: [AWS
+Systems Manager Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html).
+
 ```bash
 terraform output session_manager_command
 # aws ssm start-session --target <instance-id> --region <region>
 ```
+
 This gets you a shell via an AWS-managed channel, authenticated by IAM rather
 than network location or Tailscale's own health, so it works even when the
 Tailscale bootstrap itself is the thing that's broken. It's also the fastest
@@ -282,6 +308,39 @@ way to check *why* Tailscale didn't come up: once in, check
 `sudo journalctl -u tailscaled` and `sudo cat /var/log/cloud-init-output.log`
 (or from your own machine, without needing any session at all:
 `aws ec2 get-console-output --instance-id <instance-id>`).
+
+Two things worth knowing before you reach for this:
+
+- **Prefer `terraform output session_manager_command` over manually combining
+  `terraform output instance_id` with `aws ssm start-session` yourself.**
+  `instance_id` is a snapshot from the last `terraform apply`/`refresh` — if
+  the self-healing ASG has replaced the instance since then (a health-check
+  failure, or a manual `start-instance-refresh` you ran outside Terraform,
+  e.g. after changing `templates/user_data.sh.tpl` or `openrouter_model` — see
+  [terraform/README.md](./terraform/README.md#changing-the-agent-script-or-openrouter_model)),
+  that output is stale and points at an instance that's already gone.
+  `session_manager_command` looks the instance up live by its `Name` tag each
+  time instead, so it's correct even when Terraform's own state isn't.
+  If you do want the instance ID directly (e.g. to pass to other AWS CLI
+  commands), look it up the same live way:
+  ```bash
+  aws ec2 describe-instances \
+    --filters "Name=tag:Name,Values=hermes-personalize-agent" "Name=instance-state-name,Values=running" \
+    --region <region> --query 'Reservations[].Instances[].InstanceId' --output text
+  ```
+- **`SessionManagerPlugin is not found`** <a id="session-manager-plugin-not-found"></a>
+  means the plugin from Step 1 isn't actually installed locally — the AWS CLI
+  itself has no trouble reaching SSM, it just can't open the interactive
+  session without this plugin. On macOS with Homebrew:
+  ```bash
+  brew install --cask session-manager-plugin
+  ```
+  This one needs `sudo` to run its installer, so it'll prompt for your local
+  account password interactively — run it directly in your own terminal
+  rather than through anything non-interactive. For other OSes, see the
+  [official instructions](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+  linked in Step 1. Confirm it worked with `aws ssm start-session help`
+  before retrying.
 
 ## 4. Hermes persistent memory
 
@@ -317,9 +376,18 @@ fits the "no ingress at all" design with zero additional infrastructure.
 
 For each incoming message, the agent loads that chat's history from
 `/mnt/memory` (Step 4), sends it plus the new message to OpenRouter
-(`openrouter_model` in `terraform.tfvars`, a Nous Hermes variant by default —
-see [terraform/README.md](./terraform/README.md#variables) to change it),
+(`openrouter_model` in `terraform.tfvars`, Llama 3.3 70B by default — see
+[terraform/README.md](./terraform/README.md#variables) for why it's not a
+Nous Hermes model despite the project's name, and how to change it),
 and replies on Telegram with the model's response.
+
+The request to OpenRouter also advertises two tools the model can call:
+`web_search` (a plain HTTPS call the agent process makes to the Brave Search
+API — see `brave_api_key` in Step 1/2) and `get_time` (a purely local read of
+the instance's system clock, no external call at all). Neither is an MCP
+server or an OpenRouter-side feature; both are plain Python functions in
+`agent.py` that the agent executes itself when the model's response asks for
+them, feeding the result back for a final reply.
 
 **To use it**: message your bot on Telegram (the one you created with
 [@BotFather](https://t.me/BotFather) in Step 1) directly — nothing further to
@@ -342,7 +410,7 @@ configure, the `telegram_bot_token` from Step 1/Step 2 is already wired up.
    sudo journalctl -u hermes-agent --since "10 minutes ago"
    ```
    A clean start logs one line like
-   `hermes-agent starting, offset=0, model=nousresearch/hermes-3-llama-3.1-405b`.
+   `hermes-agent starting, offset=0, model=meta-llama/llama-3.3-70b-instruct`.
    Repeated `getUpdates failed: ...` or `OpenRouter call failed: ...` lines
    instead usually mean a bad/expired key, not a broken process — a bad
    OpenRouter key, an invalid `openrouter_model` slug, or a Telegram token
