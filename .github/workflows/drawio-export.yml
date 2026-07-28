@@ -33,8 +33,13 @@ jobs:
           remove-page-suffix: true
           action-mode: all
 
+      - name: Bust README image cache
+        run: |
+          token="${{ github.run_id }}-${{ github.run_number }}"
+          sed -i -E "s#(!\[Infrastructure diagram\]\(\./docs/export/infra\.svg)(\?[^)]*)?\)#\1?v=${token})#" README.md
+
       - name: Commit and push generated SVGs
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Chore: Export draw.io to svg via CI/CD"
-          file_pattern: "docs/export/*.svg"
+          file_pattern: "docs/export/*.svg README.md"
