@@ -44,7 +44,7 @@ scoping, security group rules, cost tables) are documented in
 [docs/infra.drawio](./docs/infra.drawio), rendered automatically to
 [docs/export/infra.svg](./docs/export/infra.svg) by CI:
 
-![Infrastructure diagram](./docs/export/infra.svg)
+![Infrastructure diagram](./docs/export/infra.svg?v=30365312171-9)
 
 ## How to set this up
 
