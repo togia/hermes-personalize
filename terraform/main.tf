@@ -43,7 +43,7 @@ data "aws_ssm_parameter" "al2023_arm64" {
 
 resource "aws_security_group" "agent" {
   name        = "${var.project_name}-sg"
-  description = "Personal Hermes agent host: no inbound rules at all. Admin access goes over Tailscale's private mesh; messaging goes over Telegram long polling. Both are outbound-initiated, so there is nothing to open inbound."
+  description = "Personal Hermes agent host: no inbound rules at all. Admin access goes over Tailscales private mesh; messaging goes over Telegram long polling. Both are outbound-initiated, so there is nothing to open inbound."
   vpc_id      = data.aws_vpc.default.id
 
   # No ingress rules, intentionally. There is no SSH-from-my-IP rule, no webhook
@@ -466,7 +466,7 @@ resource "aws_iam_role_policy_attachment" "dlm" {
 }
 
 resource "aws_dlm_lifecycle_policy" "memory_snapshots" {
-  description        = "Daily snapshots of the agent memory volume, retained ${var.snapshot_retention_days} days."
+  description        = "Daily snapshots of the agent memory volume retained ${var.snapshot_retention_days} days"
   execution_role_arn = aws_iam_role.dlm.arn
   state              = "ENABLED"
 

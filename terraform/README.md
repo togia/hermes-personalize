@@ -56,7 +56,7 @@ values and resource references flow between them:
 
 | Variable | Required? | Description |
 |---|---|---|
-| `key_name` | **Yes** | Name of an existing EC2 key pair to use for SSH access. Create one in the AWS Console or with `aws ec2 create-key-pair` first. |
+| `key_name` | **Yes** | Name of an existing EC2 key pair to use for SSH access. Must match both the `--key-name` you created it with and the `.pem` filename you'll SSH with later (e.g. `key_name = "hermes-aws"` ↔ `~/.ssh/hermes-aws.pem`). See [Step 1 in the top-level README](../README.md#1-gather-your-accounts-and-keys) for the exact `create-key-pair` command, the required `chmod 600`, and why a lost/empty `.pem` can't be recovered. |
 | `budget_alert_email` | **Yes** | Email address notified when spend crosses the budget threshold. |
 | `openrouter_api_key` | **Yes** (passed as an env var, not in `.tfvars`) | Your OpenRouter API key, stored as a SecureString in SSM Parameter Store. Never commit this or put it in `terraform.tfvars`, see below. |
 | `telegram_bot_token` | **Yes** (passed as an env var, not in `.tfvars`) | Your Telegram bot token from [@BotFather](https://t.me/BotFather), stored as a SecureString in SSM Parameter Store. Used for long polling, so no inbound webhook is required. |
@@ -75,21 +75,92 @@ values and resource references flow between them:
 1. `cp terraform.tfvars.example terraform.tfvars` and fill in `key_name` and
    `budget_alert_email`. **Do not** put any of the three secrets below in this file.
 2. `terraform init`
-3. Review the plan, passing all three secrets only as environment variables so none
-   of them are written to `terraform.tfvars`:
+3. Export the three secrets as environment variables, in this same shell, so none of
+   them are written to `terraform.tfvars` or typed at a prompt:
+   ```bash
+   export TF_VAR_openrouter_api_key="sk-or-..."
+   export TF_VAR_telegram_bot_token="123456:ABC-your-botfather-token"
+   export TF_VAR_tailscale_auth_key="tskey-auth-..."
    ```
-   TF_VAR_openrouter_api_key="sk-or-..." \
-   TF_VAR_telegram_bot_token="123456:ABC-your-botfather-token" \
-   TF_VAR_tailscale_auth_key="tskey-auth-..." \
+4. Review the plan:
+   ```bash
    terraform plan
    ```
-4. If it looks right, `apply` with the same three variables set.
+   It should show a plan to create resources with no `No value for required variable`
+   errors and no interactive prompts. If it does prompt you, see below.
+5. If the plan looks right, apply it:
+   ```bash
+   terraform apply
+   ```
+   Type `yes` when prompted to confirm.
+6. Optionally, clear the secrets from your shell once you're done:
+   ```bash
+   unset TF_VAR_openrouter_api_key TF_VAR_telegram_bot_token TF_VAR_tailscale_auth_key
+   ```
 
 `terraform.tfvars`, `*.tfstate`, and `.terraform/` are gitignored — never commit them.
 
+### If Terraform prompts you for a value interactively
+
+If you run `plan` or `apply` without exporting the env vars above, Terraform falls
+back to asking for each missing variable one at a time, e.g.:
+
+```
+var.openrouter_api_key
+  OpenRouter API key, stored as a SecureString in SSM Parameter Store.
+
+  Enter a value:
+```
+
+This is **Terraform** prompting, not SSM — it just happens to name the variable after
+the SSM parameter it's about to write, which is easy to mistake for an SSM prompt.
+Avoid typing secrets in at this prompt (it's easy to leave them sitting in your
+terminal scrollback); instead, `Ctrl+C` out and re-run with the env vars from step 3
+set. If you do end up at this prompt, here's which value goes with which name:
+
+| Prompt | Enter |
+|---|---|
+| `var.openrouter_api_key` | Your OpenRouter API key, starts with `sk-or-` |
+| `var.telegram_bot_token` | Your Telegram bot token from [@BotFather](https://t.me/BotFather), looks like `123456:ABC-...` |
+| `var.tailscale_auth_key` | Your [Tailscale auth key](https://tailscale.com/kb/1085/auth-keys), starts with `tskey-auth-` |
+
+## Rotating secrets
+
 To rotate any of the three secrets later, update them directly in SSM Parameter Store
 (console or `aws ssm put-parameter --overwrite`) rather than via Terraform — each
-parameter's `lifecycle.ignore_changes` is set so `terraform apply` won't stomp on a
-manual rotation. Note that rotating the Tailscale auth key in SSM has no effect on an
-already-running instance — it's only read once, in `user_data`, on first boot. It
-matters if the instance is ever replaced (not just stopped/started).
+parameter's `lifecycle.ignore_changes` is set (see `main.tf`) so `terraform apply` won't
+stomp on a manual rotation, and won't push a rotated value back to whatever's still in
+your shell history or `TF_VAR_*` env vars either. **No `terraform apply` needed for a
+rotation, full stop** — it's an out-of-band SSM update, nothing else.
+
+### Rotating the Tailscale auth key specifically
+
+The auth key you generate (see
+[Step 1 in the top-level README](../README.md#1-gather-your-accounts-and-keys) for the
+exact settings) expires after at most 90 days. When that happens:
+
+```bash
+aws ssm put-parameter \
+  --name /<project_name>/tailscale-auth-key \
+  --value "tskey-auth-<new-key>" \
+  --type SecureString \
+  --overwrite \
+  --region <your-region>
+```
+
+Two things worth knowing about timing:
+
+- **The currently-running instance is unaffected either way.** `user_data` reads this
+  parameter and calls `tailscale up` exactly once, on first boot. Once a node has
+  joined the tailnet, the auth key that got it there becomes irrelevant to that
+  session — the key's expiration only limits how long it can be used to onboard a
+  *new* device, it has nothing to do with how long an already-joined device stays
+  connected (that's a separate, tailnet-wide "node key expiry" setting).
+- **It only matters the next time the instance gets replaced.** Since `main.tf` runs
+  this on a self-healing Auto Scaling Group (not a static, manually-managed instance),
+  a replacement can happen at any time — a health-check failure, not just something you
+  triggered. If the SSM value is still an expired key when that happens, the
+  replacement's `user_data` fails to authenticate and never joins the tailnet; you'd
+  fall back to `terraform output session_manager_command` instead of SSH-over-Tailscale
+  until the parameter is rotated. There's no hard deadline to rotate by, just do it
+  sometime before the 90 days is up.

@@ -58,65 +58,168 @@ is a single uninterrupted `terraform apply`.
 
 Terraform needs an EC2 key pair name right away and three secrets
 (`openrouter_api_key`, `telegram_bot_token`, `tailscale_auth_key`) as
-environment variables at `apply` time. Get all five ready now so Step 2 doesn't
-stall halfway through waiting on a sign-up page:
+environment variables at `apply` time. Get everything below ready now so
+Step 2 doesn't stall halfway through waiting on a sign-up page:
 
 1. **AWS account with credentials configured locally.** Terraform's AWS
    provider uses your default credential chain (`aws configure`, SSO, or env
    vars). Confirm it works: `aws sts get-caller-identity`.
-2. **An EC2 key pair**, in the region you'll deploy to, for SSH access in
-   [Step 3](#3-connect-to-the-instance-over-tailscale). Create one in the AWS
-   Console (EC2 → Key Pairs) or with
-   `aws ec2 create-key-pair --key-name <name> --query 'KeyMaterial' --output text > <name>.pem`.
-   Keep the `.pem` file, you'll need it again in Step 3.
-3. **An OpenRouter API key.** Sign up at [openrouter.ai](https://openrouter.ai)
+2. **The Session Manager plugin for the AWS CLI**, installed locally:
+   [instructions for your OS](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html).
+   Confirm it works: `aws ssm start-session help` should print help text, not
+   `SessionManagerPlugin is not found`. This isn't needed for the primary
+   SSH-over-Tailscale path in Step 3, but it's what
+   `aws ssm start-session`/`terraform output session_manager_command` need
+   under the hood — the documented fallback for exactly the moment SSH or
+   Tailscale itself is what's broken, so it's worth confirming *now*, while
+   things are working, rather than discovering it's missing during an
+   outage.
+3. **An EC2 key pair**, in the region you'll deploy to, for SSH access in
+   [Step 3](#3-connect-to-the-instance-over-tailscale). Set the name **once**,
+   in a shell variable, then reuse that variable everywhere below — this is
+   what keeps `--key-name`, the `.pem` filename, and `key_name` in
+   `terraform.tfvars` (Step 2) from drifting apart, instead of relying on you
+   to retype the same string correctly four times:
+
+   ```bash
+   KEY_NAME="hermes-aws"   # pick any name; you'll reuse $KEY_NAME below and in Step 2
+   KEY_REGION="eu-west-2"  # must match aws_region in terraform.tfvars (Step 2); eu-west-2 is Terraform's default, see terraform/variables.tf
+
+   aws ec2 create-key-pair \
+     --key-name "$KEY_NAME" \
+     --region "$KEY_REGION" \
+     --query 'KeyMaterial' \
+     --output text > ~/.ssh/"$KEY_NAME".pem
+   chmod 600 ~/.ssh/"$KEY_NAME".pem
+   ```
+
+   - **Key pairs are scoped to a single region in AWS.** `$KEY_REGION` here
+     must be the same region Terraform deploys into (`aws_region` in
+     `terraform.tfvars`, or the `eu-west-2` default in
+     `terraform/variables.tf` if you don't set it) — a key pair created in the
+     wrong region simply won't exist as far as that `terraform apply` is
+     concerned, and it'll fail with `InvalidKeyPair.NotFound`. Change
+     `KEY_REGION` above if you're deploying somewhere other than `eu-west-2`.
+   - This is *why* `--key-name` and the `.pem` filename must match, not just a
+     style preference: in Step 2
+     Terraform passes `key_name` to AWS to say "boot the instance with the
+     public half of *this* key pair"; in Step 3 you point `ssh -i` at the
+     private half yourself. AWS has no way to tell `ssh` which `.pem` goes
+     with which `key_name` — nothing checks or connects those two strings for
+     you, so if they don't match, `ssh` reads a key that doesn't correspond to
+     the one on the instance and authentication fails with no clearer error
+     than a hang or `Permission denied (publickey)`.
+   - `chmod 600` is **not optional**. SSH refuses to use a private key that's
+     readable by anyone but you and fails with `Permissions ... are too open`
+     — and the permissions left behind by a shell redirect (`>`) are usually
+     too loose by default.
+   - Verify the file isn't empty before moving on:
+     `wc -c ~/.ssh/"$KEY_NAME".pem` should print something greater than 0. A
+     0-byte file usually means `create-key-pair` itself errored (check for a
+     message above it, e.g. a name that's already taken) but the `>` redirect
+     silently created the empty file anyway.
+   - **AWS hands you the private key material exactly once, at creation
+     time — it is never stored anywhere and cannot be recovered later**, not
+     by AWS, not by Terraform, not by re-running the command. If the `.pem`
+     file above ends up empty, wrong, or lost, re-running `create-key-pair`
+     with the same `$KEY_NAME` fails with `InvalidKeyPair.Duplicate` — AWS
+     won't let two key pairs share a name. You must delete the broken one
+     first, then create a fresh one under the same name:
+     ```bash
+     aws ec2 delete-key-pair --key-name "$KEY_NAME" --region "$KEY_REGION"
+     ```
+     then re-run the `create-key-pair` command above.
+   - **This only helps instances launched *after* you recreate the key.** EC2
+     pushes a key pair's public half onto an instance's `authorized_keys`
+     once, at launch — never retroactively. If an instance is already running
+     with the now-broken key pair (e.g. you already ran `terraform apply` in
+     Step 2 before noticing the `.pem` was bad), recreating the key pair here
+     does nothing for *that* instance; you're locked out of it either way.
+     Get back in via [Session Manager](#3-connect-to-the-instance-over-tailscale)
+     instead (`terraform output session_manager_command`, no key pair
+     required), then either manually add your new public key
+     (`ssh-keygen -y -f ~/.ssh/"$KEY_NAME".pem`) to `~/.ssh/authorized_keys`
+     for `ec2-user`, or force the instance to be replaced so it relaunches
+     with the new key already baked in.
+   - You'll type `$KEY_NAME`'s value into `terraform.tfvars` as `key_name` by
+     hand in Step 2 — Terraform doesn't read these shell variables itself,
+     they're just here so you only type each value once and copy-paste it
+     everywhere else, instead of retyping it and risking a typo. Run
+     `echo $KEY_NAME $KEY_REGION` if you need them again and the variables are
+     still set in this shell. If `$KEY_REGION` isn't `eu-west-2`, also set
+     `aws_region = "$KEY_REGION"` in `terraform.tfvars` — otherwise Terraform
+     silently uses its own `eu-west-2` default and deploys somewhere your key
+     pair doesn't exist.
+   - Prefer the Console? EC2 → Key Pairs → **Create key pair** → name it
+     whatever you'll use as `$KEY_NAME` → File format `.pem` → it downloads
+     once (usually to `~/Downloads`); move it to `~/.ssh/`, name it
+     `<that-same-name>.pem`, and `chmod 600` it exactly as above.
+4. **An OpenRouter API key.** Sign up at [openrouter.ai](https://openrouter.ai)
    and create a key under Settings → API Keys. OpenRouter bills model usage
    separately from AWS; this repo only stores the key and lets the agent
    process use it.
-4. **A Telegram bot token.** Message [@BotFather](https://t.me/BotFather),
+5. **A Telegram bot token.** Message [@BotFather](https://t.me/BotFather),
    run `/newbot`, and copy the token it gives you. You won't interact with
    this bot again until [Step 5](#5-connecting-with-telegram-planned) — you're
    creating it now purely because the token needs to go into SSM alongside the
    other secrets during provisioning.
-5. **A Tailscale auth key.** Sign up at [tailscale.com](https://tailscale.com)
-   (free for personal use) and generate an
-   [auth key](https://tailscale.com/kb/1085/auth-keys) from the admin console.
-   This lets the instance join your tailnet automatically on first boot; you'll
-   install Tailscale on your own devices separately in Step 3.
+6. **A Tailscale auth key.** Sign up at [tailscale.com](https://tailscale.com)
+   (free for personal use), then go to
+   [console.tailscale.com/admin/settings/keys](https://console.tailscale.com/admin/settings/keys)
+   and click **Generate auth key...**. This lets the instance join your tailnet
+   automatically on first boot; you'll install Tailscale on your own devices
+   separately in Step 3. In the dialog that opens:
+   - **Description:** anything memorable, e.g. `hermes-aws`, purely for your
+     own reference in the admin console later.
+   - **Reusable: ON** (it defaults to off). The instance sits behind a
+     self-healing Auto Scaling Group (min=max=desired=1), so a health-check
+     failure can terminate and relaunch it automatically, not just when you do
+     it manually — see `terraform/main.tf`. A single-use key would only let
+     the *first* instance join; every replacement after that would fail to
+     authenticate.
+   - **Expiration:** 90 days, the maximum Tailscale allows and also the
+     default. Because the ASG can replace the instance at *any* time, an
+     expired key breaks silently: the replacement instance never joins your
+     tailnet, and everything quietly falls back to the [Session Manager
+     fallback](#3-connect-to-the-instance-over-tailscale) described in Step 3.
+     Put a reminder somewhere to regenerate the key and update the SSM
+     parameter before it expires — **this is a plain `aws ssm put-parameter`
+     update, not a `terraform apply`**, and it doesn't affect the currently
+     running instance either way, only the next time the ASG replaces it. See
+     [terraform/README.md](./terraform/README.md#rotating-secrets) for the
+     exact command and the reasoning.
+   - **Ephemeral: ON** (under Device Settings, defaults to off). So a replaced
+     instance's old tailnet entry is removed automatically the moment it goes
+     offline, instead of leaving a dead node behind every time the ASG
+     replaces the instance.
+   - **Tags: leave OFF.** `terraform/main.tf`'s `user_data` calls
+     `tailscale up` with no `--advertise-tags`, so this setup doesn't need any.
+     Leave it off for another reason too: Tailscale's dialog notes that
+     turning Tags on **also disables node key expiry** for the device, which
+     you don't want to silently opt into here — with Tags off, node key expiry
+     stays on its normal tailnet-wide default, independent of the 90-day auth
+     key expiration above (that one only limits how long the key itself can
+     be used to onboard new devices, not how long an already-joined device
+     stays trusted).
+   - Click **Generate key** and copy the result (starts with
+     `tskey-auth-...`) somewhere safe immediately, Tailscale only shows it
+     once.
 
-With all five in hand, move to Step 2.
+With all six in hand, move to Step 2.
 
 ## 2. Provision the infrastructure
 
 The Terraform in [terraform/](./terraform) provisions an EC2 instance, a
 separate encrypted EBS volume for long-term memory, daily snapshots, IAM scoped
-to least privilege, and a budget alert. Every file, every variable, and how to
-rotate secrets afterward are documented in
-[terraform/README.md](./terraform/README.md) — what follows is just the
-commands:
+to least privilege, and a budget alert.
 
-```bash
-cd terraform
-cp terraform.tfvars.example terraform.tfvars
-# edit terraform.tfvars: key_name (from Step 1.2), budget_alert_email
-
-terraform init
-
-# Pass all three secrets from Step 1 only as env vars, never in terraform.tfvars
-TF_VAR_openrouter_api_key="sk-or-..." \
-TF_VAR_telegram_bot_token="123456:ABC-your-botfather-token" \
-TF_VAR_tailscale_auth_key="tskey-auth-..." \
-terraform plan
-
-TF_VAR_openrouter_api_key="sk-or-..." \
-TF_VAR_telegram_bot_token="123456:ABC-your-botfather-token" \
-TF_VAR_tailscale_auth_key="tskey-auth-..." \
-terraform apply
-```
-
-`terraform.tfvars`, `*.tfstate`, and `.terraform/` are gitignored, never commit
-them. Once `terraform apply` finishes, give the instance a minute to boot and
-join your tailnet before moving to Step 3.
+Every file, every variable, the full `init`/`plan`/`apply` command sequence,
+what to do if Terraform prompts you interactively for a secret, and how to
+rotate secrets afterward are all documented in
+[terraform/README.md](./terraform/README.md#usage) — follow that from here,
+using `key_name` and the three secrets gathered in Step 1 above. Once
+`terraform apply` finishes, give the instance a minute to boot and join your
+tailnet before moving to Step 3.
 
 ## 3. Connect to the instance over Tailscale
 
@@ -133,11 +236,21 @@ public IP. The instance joined your tailnet automatically during boot in Step 2
    the hostname `<project_name>-agent`.
 3. SSH to that IP with the key pair from Step 1:
    ```bash
-   ssh -i <path-to-your-key>.pem ec2-user@<tailscale-ip>
+   ssh -i ~/.ssh/hermes-aws.pem ec2-user@<tailscale-ip>
    ```
    (`terraform output ssh_instructions` prints a reminder of this.)
 
 Notes:
+
+- **`Permissions ... are too open` / `WARNING: UNPROTECTED PRIVATE KEY FILE`**:
+  the `.pem` file's permissions are too loose; run
+  `chmod 600 ~/.ssh/hermes-aws.pem` (see Step 1) and retry. If SSH then fails
+  to authenticate rather than refusing the file, or the `.pem` is 0 bytes
+  (`wc -c ~/.ssh/hermes-aws.pem`), the key material itself is missing or
+  wrong — see the "lost the private key" note in Step 1, there's no way to
+  recover it, only to generate a new key pair. In the meantime, the [Session
+  Manager fallback](#3-connect-to-the-instance-over-tailscale) below still
+  works, since it doesn't depend on this key pair at all.
 
 - The instance's public IP (`terraform output public_ip`) still exists and
   still changes on every stop/start, exactly as before, but it's no longer
