@@ -47,6 +47,29 @@ values and resource references flow between them:
 | `terraform.tfvars.example` | Template for the values you need to fill in |
 | `.terraform.lock.hcl` | Provider version lock — commit this, it's not a secret |
 
+> Looking for the account sign-ups (OpenRouter, Telegram, Tailscale) that these
+> variables' values come from? See
+> [Step 1 in the top-level README](../README.md#1-gather-your-accounts-and-keys) —
+> gather those first, this file assumes you already have them.
+
+## Variables
+
+| Variable | Required? | Description |
+|---|---|---|
+| `key_name` | **Yes** | Name of an existing EC2 key pair to use for SSH access. Create one in the AWS Console or with `aws ec2 create-key-pair` first. |
+| `budget_alert_email` | **Yes** | Email address notified when spend crosses the budget threshold. |
+| `openrouter_api_key` | **Yes** (passed as an env var, not in `.tfvars`) | Your OpenRouter API key, stored as a SecureString in SSM Parameter Store. Never commit this or put it in `terraform.tfvars`, see below. |
+| `telegram_bot_token` | **Yes** (passed as an env var, not in `.tfvars`) | Your Telegram bot token from [@BotFather](https://t.me/BotFather), stored as a SecureString in SSM Parameter Store. Used for long polling, so no inbound webhook is required. |
+| `tailscale_auth_key` | **Yes** (passed as an env var, not in `.tfvars`) | A [Tailscale auth key](https://tailscale.com/kb/1085/auth-keys) used to join the instance to your tailnet on first boot, stored as a SecureString in SSM Parameter Store. This is what gives you a stable IP for admin access no matter where you're connecting from. |
+| `aws_region` | No (default `eu-west-2`) | AWS region to deploy into. |
+| `project_name` | No (default `hermes-personalize`) | Name prefix used to tag and identify all resources. |
+| `instance_type` | No (default `t4g.micro`) | EC2 instance type. Move to `t4g.small` if the memory store grows (e.g. a real vector DB). |
+| `root_volume_size_gb` | No (default `8`) | OS root volume size, holds the OS only, not agent memory. |
+| `data_volume_size_gb` | No (default `20`) | Size of the separate EBS volume that holds long-term agent memory. |
+| `snapshot_retention_days` | No (default `14`) | How many daily snapshots of the memory volume to retain. |
+| `budget_limit_usd` | No (default `15`) | Monthly AWS Budget alert threshold in USD. |
+| `enable_cloudwatch_logs` | No (default `true`) | Whether to create a CloudWatch Logs group for the agent process. |
+
 ## Usage
 
 1. `cp terraform.tfvars.example terraform.tfvars` and fill in `key_name` and

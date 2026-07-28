@@ -34,9 +34,9 @@ restarts. This repo addresses that gap with four things:
   instance, there's no load balancer, API Gateway, or NAT Gateway to provision,
   pay for, or secure — cost and attack surface shrink together here, not as a
   trade-off against each other. See [docs/infra.md](./docs/infra.md) for the
-  full rationale, and the [Possible upgrades](#5-possible-upgrades) section below
-  for what changes if you want a webhook-based integration (e.g. WhatsApp) or
-  even tighter isolation later.
+  full rationale, and [Step 6](#6-possible-upgrades) below for what changes if
+  you want a webhook-based integration (e.g. WhatsApp) or even tighter
+  isolation later.
 
 The full architecture and rationale (instance sizing, storage choice, IAM
 scoping, security group rules, cost tables) are documented in
@@ -46,41 +46,63 @@ scoping, security group rules, cost tables) are documented in
 
 ![Infrastructure diagram](./docs/export/infra.svg)
 
-## 1. Provisioning the infrastructure
+## How to set this up
+
+The steps below are meant to be followed in order, top to bottom, with no need
+to jump ahead or double back. In particular: **Telegram and Tailscale both need
+an account and a key created before you touch Terraform**, because Terraform
+takes them as inputs. Step 1 gets everything you need lined up first, so Step 2
+is a single uninterrupted `terraform apply`.
+
+## 1. Gather your accounts and keys
+
+Terraform needs an EC2 key pair name right away and three secrets
+(`openrouter_api_key`, `telegram_bot_token`, `tailscale_auth_key`) as
+environment variables at `apply` time. Get all five ready now so Step 2 doesn't
+stall halfway through waiting on a sign-up page:
+
+1. **AWS account with credentials configured locally.** Terraform's AWS
+   provider uses your default credential chain (`aws configure`, SSO, or env
+   vars). Confirm it works: `aws sts get-caller-identity`.
+2. **An EC2 key pair**, in the region you'll deploy to, for SSH access in
+   [Step 3](#3-connect-to-the-instance-over-tailscale). Create one in the AWS
+   Console (EC2 → Key Pairs) or with
+   `aws ec2 create-key-pair --key-name <name> --query 'KeyMaterial' --output text > <name>.pem`.
+   Keep the `.pem` file, you'll need it again in Step 3.
+3. **An OpenRouter API key.** Sign up at [openrouter.ai](https://openrouter.ai)
+   and create a key under Settings → API Keys. OpenRouter bills model usage
+   separately from AWS; this repo only stores the key and lets the agent
+   process use it.
+4. **A Telegram bot token.** Message [@BotFather](https://t.me/BotFather),
+   run `/newbot`, and copy the token it gives you. You won't interact with
+   this bot again until [Step 5](#5-connecting-with-telegram-planned) — you're
+   creating it now purely because the token needs to go into SSM alongside the
+   other secrets during provisioning.
+5. **A Tailscale auth key.** Sign up at [tailscale.com](https://tailscale.com)
+   (free for personal use) and generate an
+   [auth key](https://tailscale.com/kb/1085/auth-keys) from the admin console.
+   This lets the instance join your tailnet automatically on first boot; you'll
+   install Tailscale on your own devices separately in Step 3.
+
+With all five in hand, move to Step 2.
+
+## 2. Provision the infrastructure
 
 The Terraform in [terraform/](./terraform) provisions an EC2 instance, a
 separate encrypted EBS volume for long-term memory, daily snapshots, IAM scoped
-to least privilege, and a budget alert. Full details on each file are in
-[terraform/README.md](./terraform/README.md); the essentials are below.
-
-### Variables you need to supply
-
-| Variable | Required? | Description |
-|---|---|---|
-| `key_name` | **Yes** | Name of an existing EC2 key pair to use for SSH access. Create one in the AWS Console or with `aws ec2 create-key-pair` first. |
-| `budget_alert_email` | **Yes** | Email address notified when spend crosses the budget threshold. |
-| `openrouter_api_key` | **Yes** (passed as an env var, not in `.tfvars`) | Your OpenRouter API key, stored as a SecureString in SSM Parameter Store. Never commit this or put it in `terraform.tfvars`, see below. |
-| `telegram_bot_token` | **Yes** (passed as an env var, not in `.tfvars`) | Your Telegram bot token from [@BotFather](https://t.me/BotFather), stored as a SecureString in SSM Parameter Store. Used for long polling, so no inbound webhook is required. |
-| `tailscale_auth_key` | **Yes** (passed as an env var, not in `.tfvars`) | A [Tailscale auth key](https://tailscale.com/kb/1085/auth-keys) used to join the instance to your tailnet on first boot, stored as a SecureString in SSM Parameter Store. This is what gives you a stable IP for admin access no matter where you're connecting from. |
-| `aws_region` | No (default `eu-west-2`) | AWS region to deploy into. |
-| `project_name` | No (default `hermes-personalize`) | Name prefix used to tag and identify all resources. |
-| `instance_type` | No (default `t4g.micro`) | EC2 instance type. Move to `t4g.small` if the memory store grows (e.g. a real vector DB). |
-| `root_volume_size_gb` | No (default `8`) | OS root volume size, holds the OS only, not agent memory. |
-| `data_volume_size_gb` | No (default `20`) | Size of the separate EBS volume that holds long-term agent memory. |
-| `snapshot_retention_days` | No (default `14`) | How many daily snapshots of the memory volume to retain. |
-| `budget_limit_usd` | No (default `15`) | Monthly AWS Budget alert threshold in USD. |
-| `enable_cloudwatch_logs` | No (default `true`) | Whether to create a CloudWatch Logs group for the agent process. |
-
-### Steps
+to least privilege, and a budget alert. Every file, every variable, and how to
+rotate secrets afterward are documented in
+[terraform/README.md](./terraform/README.md) — what follows is just the
+commands:
 
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
-# edit terraform.tfvars: key_name, budget_alert_email
+# edit terraform.tfvars: key_name (from Step 1.2), budget_alert_email
 
 terraform init
 
-# Pass all three secrets only as env vars, never in terraform.tfvars
+# Pass all three secrets from Step 1 only as env vars, never in terraform.tfvars
 TF_VAR_openrouter_api_key="sk-or-..." \
 TF_VAR_telegram_bot_token="123456:ABC-your-botfather-token" \
 TF_VAR_tailscale_auth_key="tskey-auth-..." \
@@ -93,18 +115,15 @@ terraform apply
 ```
 
 `terraform.tfvars`, `*.tfstate`, and `.terraform/` are gitignored, never commit
-them. To rotate any of the three secrets later, update them directly in SSM
-Parameter Store rather than via Terraform (see
-[terraform/README.md](./terraform/README.md) for why — and for the one caveat
-around rotating the Tailscale key specifically).
+them. Once `terraform apply` finishes, give the instance a minute to boot and
+join your tailnet before moving to Step 3.
 
-## 2. Connecting to the instance
+## 3. Connect to the instance over Tailscale
 
 Admin access goes over [Tailscale](https://tailscale.com), not the instance's
-public IP. The instance joins your tailnet automatically on first boot (via the
-`user_data` script in `terraform/main.tf`, using the `tailscale_auth_key` you
-supplied), so once `terraform apply` finishes and the instance has had a minute
-to boot:
+public IP. The instance joined your tailnet automatically during boot in Step 2
+(via the `user_data` script in `terraform/main.tf`, using the
+`tailscale_auth_key` from Step 1), so:
 
 1. Install Tailscale on your own machine (laptop and/or phone) and sign in to
    the same tailnet: [tailscale.com/download](https://tailscale.com/download).
@@ -112,7 +131,7 @@ to boot:
    [Tailscale admin console](https://login.tailscale.com/admin/machines) or by
    running `tailscale status` on any device already in the tailnet, look for
    the hostname `<project_name>-agent`.
-3. SSH to that IP with your existing key pair:
+3. SSH to that IP with the key pair from Step 1:
    ```bash
    ssh -i <path-to-your-key>.pem ec2-user@<tailscale-ip>
    ```
@@ -152,12 +171,12 @@ way to check *why* Tailscale didn't come up: once in, check
 (or from your own machine, without needing any session at all:
 `aws ec2 get-console-output --instance-id <instance-id>`).
 
-## 3. Setting up Hermes persistent memory
+## 4. Setting up Hermes persistent memory (planned)
 
 > **Status: planned, not yet implemented.** The infrastructure to support this
 > (a separate encrypted EBS volume, `DeleteOnTermination=false`, daily snapshots
-> via DLM) is already provisioned by Terraform. The agent process and its
-> memory layer itself have not been built yet.
+> via DLM) is already provisioned by Terraform in Step 2. The agent process and
+> its memory layer itself have not been built yet.
 
 The intended design, per [docs/infra.md](./docs/infra.md):
 
@@ -174,11 +193,14 @@ The intended design, per [docs/infra.md](./docs/infra.md):
 This section will be filled in with concrete setup steps once the agent process
 and memory layer are implemented.
 
-## 4. Connecting with Telegram
+## 5. Connecting with Telegram (planned)
 
 > **Status: planned, not yet implemented.** The Tailscale/no-ingress networking
 > this relies on is already provisioned by Terraform; the agent process itself
-> (the thing that actually calls Telegram and OpenRouter) has not been built yet.
+> (the thing that actually calls Telegram and OpenRouter) has not been built
+> yet. The bot token itself was already created and handed to Terraform back in
+> Step 1 — nothing further to set up on the Telegram side until the agent
+> process exists.
 
 The intended design is **long polling**, not a webhook: the agent process calls
 Telegram's `getUpdates` endpoint from inside the instance, which holds the
@@ -189,19 +211,14 @@ public HTTP endpoint, no inbound security group rule, and no load balancer or
 API Gateway in front of the instance, it fits the "no ingress at all" design
 described above with zero additional infrastructure.
 
-Setup, once the agent process exists:
-1. Create a bot via [@BotFather](https://t.me/BotFather) and get its token.
-2. Store it as `telegram_bot_token` at `terraform apply` time (see above), it
-   ends up in SSM Parameter Store for the agent process to read at runtime.
-3. Point the agent process's polling loop at that token, no further
-   infrastructure changes needed.
+Once the agent process exists, the only remaining step is pointing its polling
+loop at the `telegram_bot_token` already sitting in SSM Parameter Store from
+Step 1/Step 2 — no further infrastructure changes needed. If you want WhatsApp
+instead of (or alongside) Telegram, see [Step 6](#6-possible-upgrades) below,
+WhatsApp's Cloud API requires a webhook, so it needs a bit more infrastructure
+than Telegram does.
 
-This section will be filled in with concrete setup steps once the agent process
-exists. If you want WhatsApp instead of (or alongside) Telegram, see
-[Possible upgrades](#5-possible-upgrades) below, WhatsApp's Cloud API requires a
-webhook, so it needs a bit more infrastructure than Telegram does.
-
-## 5. Possible upgrades
+## 6. Possible upgrades
 
 This design intentionally starts from the cheapest, most locked-down
 configuration that still does the job: no ingress at all, admin access over
