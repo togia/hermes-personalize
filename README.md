@@ -14,11 +14,11 @@ restarts. This repo addresses that gap with four things:
 - **No GPU provisioning.** The model runs on OpenRouter's infrastructure and is
   billed separately by them (their per-token pricing is not included here). The
   AWS side only needs to run an orchestration process, so it uses a cheap
-  Graviton instance (`t4g.micro`), not an inference-capable one.
+  Graviton instance (`t4g.small`), not an inference-capable one.
 - **Cost-effective by default.** No Elastic IP (auto-assigned public IP instead,
   which costs nothing while the instance is stopped), gp3 storage, SSM
   Parameter Store instead of Secrets Manager for secrets, and a
-  stop/start-friendly design. Estimated at $4 to $14/month depending on uptime;
+  stop/start-friendly design. Estimated at $7 to $21/month depending on uptime;
   see [docs/infra.md](./docs/infra.md) for the full cost breakdown.
 - **Backed-up long-term memory.** Agent state lives on a separate encrypted EBS
   volume, not the OS disk, with `DeleteOnTermination=false`, EC2 termination
@@ -56,9 +56,9 @@ is a single uninterrupted `terraform apply`.
 
 ## 1. Gather your accounts and keys
 
-Terraform needs an EC2 key pair name right away and four secrets
-(`openrouter_api_key`, `telegram_bot_token`, `tailscale_auth_key`,
-`brave_api_key`) as environment variables at `apply` time. Get everything
+Terraform needs an EC2 key pair name right away and three secrets
+(`openrouter_api_key`, `telegram_bot_token`, `tailscale_auth_key`) as
+environment variables at `apply` time. Get everything
 below ready now so Step 2 doesn't stall halfway through waiting on a sign-up
 page:
 
@@ -205,13 +205,8 @@ page:
    - Click **Generate key** and copy the result (starts with
      `tskey-auth-...`) somewhere safe immediately, Tailscale only shows it
      once.
-7. **A Brave Search API key.** Sign up at
-   [api.search.brave.com](https://api.search.brave.com/app/keys) and create a
-   key (free tier: 2,000 queries/month). This is used by the agent's
-   `web_search` tool — a plain HTTPS call the agent process itself makes, not
-   anything OpenRouter or Telegram-related.
-
-With all seven in hand, move to Step 2.
+With all six in hand, move to Step 2. Microsoft Edge TTS is the default voice
+provider and does not need an API key.
 
 ## 2. Provision the infrastructure
 
@@ -223,7 +218,7 @@ Every file, every variable, the full `init`/`plan`/`apply` command sequence,
 what to do if Terraform prompts you interactively for a secret, and how to
 rotate secrets afterward are all documented in
 [terraform/README.md](./terraform/README.md#usage) — follow that from here,
-using `key_name` and the four secrets gathered in Step 1 above. Once
+using `key_name` and the three secrets gathered in Step 1 above. Once
 `terraform apply` finishes, give the instance a minute to boot and join your
 tailnet before moving to Step 3.
 
@@ -346,16 +341,14 @@ Two things worth knowing before you reach for this:
 
 `user_data` (`terraform/templates/user_data.sh.tpl`) formats the memory volume
 on its first-ever boot only (later boots detect the existing filesystem and
-skip straight to mounting), then mounts it at `/mnt/memory`:
+skip straight to mounting), then mounts it at `/mnt/memory`.
 
-- `/mnt/memory/conversations/<chat_id>.json` — one flat JSON file per Telegram
-  chat, holding the last 20 messages of that conversation. No database, no
-  vector store yet, just files — matching the "whatever your app uses" note in
-  [docs/infra.md](./docs/infra.md). Trimmed to bound both disk use and the size
-  (cost) of each OpenRouter request; if you want longer recall or semantic
-  search later, this is the piece to swap for a real store.
-- `/mnt/memory/telegram_offset.txt` — the last processed Telegram update ID,
-  so a restart doesn't reprocess (or skip) messages.
+The official [NousResearch Hermes Agent CLI](https://github.com/NousResearch/hermes-agent)
+stores its configuration, sessions, memories, skills, and gateway state under
+`/mnt/memory/hermes` through `HERMES_HOME`. That directory, rather than the
+old custom agent's JSON conversation files, is the durable memory boundary.
+Existing `/mnt/memory/conversations/*.json` and `telegram_offset.txt` files
+are not imported by Hermes and are left untouched.
 
 This survives instance replacement (the whole reason it's a separate volume,
 not part of the OS disk — see Step 2/`docs/infra.md`), and the DLM daily
@@ -363,35 +356,70 @@ snapshot policy (retain 14 days by default) is the safety net on top of that.
 
 ## 5. Connecting with Telegram
 
-The agent (`terraform/templates/user_data.sh.tpl`, installed to
-`/opt/hermes-agent/agent.py` and run as the `hermes-agent` systemd service)
-does exactly what [docs/infra.md](./docs/infra.md) specifies: **long polling**,
-not a webhook. It calls Telegram's `getUpdates` endpoint from inside the
-instance, which holds the connection open and returns as soon as a message
-arrives (or times out and gets called again). This is a deliberate choice over
-Telegram's alternative webhook mode (`setWebhook`): long polling is entirely
-outbound-initiated, so it needs no public HTTP endpoint, no inbound security
-group rule, and no load balancer or API Gateway in front of the instance — it
-fits the "no ingress at all" design with zero additional infrastructure.
+The official Hermes CLI is installed from the NousResearch repository by
+`terraform/templates/user_data.sh.tpl` and run as `hermes gateway run` under
+the `hermes-agent` systemd service. Its Telegram gateway uses **long polling**,
+not a webhook: all traffic is initiated outbound, so it needs no public HTTP
+endpoint, inbound security-group rule, load balancer, or API Gateway.
 
-For each incoming message, the agent loads that chat's history from
-`/mnt/memory` (Step 4), sends it plus the new message to OpenRouter
-(`openrouter_model` in `terraform.tfvars`, Llama 3.3 70B by default — see
-[terraform/README.md](./terraform/README.md#variables) for why it's not a
-Nous Hermes model despite the project's name, and how to change it),
-and replies on Telegram with the model's response.
+For each incoming message, the official [NousResearch Hermes Agent CLI](https://github.com/NousResearch/hermes-agent)
+loads its persistent state from `/mnt/memory/hermes`, sends the conversation to
+OpenRouter, and replies on Telegram. The default model is
+`deepseek/deepseek-v4-pro`; see [terraform/README.md](./terraform/README.md#variables)
+to change it.
 
-The request to OpenRouter also advertises two tools the model can call:
-`web_search` (a plain HTTPS call the agent process makes to the Brave Search
-API — see `brave_api_key` in Step 1/2) and `get_time` (a purely local read of
-the instance's system clock, no external call at all). Neither is an MCP
-server or an OpenRouter-side feature; both are plain Python functions in
-`agent.py` that the agent executes itself when the model's response asks for
-them, feeding the result back for a final reply.
+Hermes owns the agent loop and local tool execution. It advertises its native
+tool schemas to OpenRouter, parses the returned tool calls, invokes the tools
+on the instance, then sends their results back for the final response. This is
+the full Hermes Agent gateway rather than the repository's former custom
+Telegram/OpenRouter loop.
+
+### Microsoft Edge voice replies
+
+This deployment configures Hermes TTS to use the free Microsoft Edge provider
+with the British English `en-GB-SoniaNeural` voice. No Microsoft API key is
+required. Enable voice replies in your Telegram chat with `/voice tts` (always
+reply with voice) or `/voice on` (voice-to-voice mode); use `/voice off` to
+disable them. The instance installs an ARM64 static `ffmpeg` binary at boot,
+which converts Edge TTS audio to Ogg/Opus so Hermes routes it through
+Telegram's native `sendVoice` method,
+which renders as an inline voice note instead of a WAV attachment. This is the
+intended voice-reply path: `sendAudio` is also an inline Telegram player, but
+Hermes reserves it for regular MP3/M4A audio attachments. No prompt or custom
+Telegram API call is needed; a new TTS reply after `ffmpeg` is installed uses
+the native voice-message route automatically.
 
 **To use it**: message your bot on Telegram (the one you created with
 [@BotFather](https://t.me/BotFather) in Step 1) directly — nothing further to
 configure, the `telegram_bot_token` from Step 1/Step 2 is already wired up.
+
+### First-time Telegram pairing
+
+Hermes protects direct messages with a pairing flow. The first time you message
+the bot, it replies with an eight-character pairing code. Approve that code on
+the instance (over SSH or Session Manager) as the same `ec2-user` account that
+runs the gateway:
+
+```bash
+sudo -u ec2-user env \
+  HOME=/home/ec2-user \
+  HERMES_HOME=/mnt/memory/hermes \
+  /home/ec2-user/.local/bin/hermes pairing approve telegram <PAIRING_CODE>
+```
+
+To inspect pending or approved pairings:
+
+```bash
+sudo -u ec2-user env \
+  HOME=/home/ec2-user \
+  HERMES_HOME=/mnt/memory/hermes \
+  /home/ec2-user/.local/bin/hermes pairing list
+```
+
+Pairing codes expire after one hour. An approved pairing is stored within
+`HERMES_HOME` on the persistent memory volume, so it survives gateway or EC2
+restarts and an Auto Scaling Group replacement. Pair again only if that memory
+volume is replaced, reformatted, or its Hermes state is removed.
 
 **To check on it**, over SSH or Session Manager (Step 3):
 
@@ -409,22 +437,16 @@ configure, the `telegram_bot_token` from Step 1/Step 2 is already wired up.
    ```bash
    sudo journalctl -u hermes-agent --since "10 minutes ago"
    ```
-   A clean start logs one line like
-   `hermes-agent starting, offset=0, model=meta-llama/llama-3.3-70b-instruct`.
-   Repeated `getUpdates failed: ...` or `OpenRouter call failed: ...` lines
-   instead usually mean a bad/expired key, not a broken process — a bad
-   OpenRouter key, an invalid `openrouter_model` slug, or a Telegram token
-   typo all surface as errors here rather than a failed boot, since the
-   service itself starts fine either way and `Restart=always` keeps it
-   retrying, per `terraform/templates/user_data.sh.tpl`.
+   Hermes gateway startup and provider errors are logged here. A bad OpenRouter
+   key, invalid `openrouter_model` slug, or Telegram token typo surfaces in the
+   gateway logs; `Restart=always` retries the service.
 4. **Confirm memory is actually being written** — after messaging the bot
    once:
    ```bash
-   ls /mnt/memory/conversations/
-   cat /mnt/memory/conversations/*.json
+   ls /mnt/memory/hermes
    ```
-   One JSON file per Telegram chat ID, holding your message and the model's
-   reply.
+   Hermes manages its own session, memory, and gateway files under this
+   directory.
 5. **The real test**: message your bot on Telegram and see if it replies —
    everything above is diagnostic if it doesn't.
 

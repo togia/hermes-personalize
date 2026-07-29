@@ -1,10 +1,11 @@
 # Terraform infrastructure
 
 This directory provisions the architecture described in [../docs/infra.md](../docs/infra.md):
-an EC2 t4g.micro host that calls the OpenRouter API and polls Telegram for messages,
-with long-term memory on a separate encrypted EBS volume, daily snapshots, and a
-security group with no inbound rules at all — admin access rides over Tailscale
-instead of a locked-to-your-IP SSH rule.
+an EC2 t4g.small host running the official NousResearch Hermes Agent CLI, with
+DeepSeek V4 Pro through OpenRouter, Telegram gateway polling, native tool execution,
+and long-term memory on a separate encrypted EBS volume. Daily snapshots and a
+security group with no inbound rules preserve the same low-exposure design; admin
+access rides over Tailscale instead of a locked-to-your-IP SSH rule.
 
 Terraform loads these files together as one module; the diagram below shows how
 values and resource references flow between them:
@@ -41,9 +42,9 @@ values and resource references flow between them:
 | File | Contents |
 |---|---|
 | `versions.tf` | Terraform/provider version pins (`hashicorp/aws ~> 5.0`) |
-| `variables.tf` | Inputs: EC2 key pair name, instance/volume sizing, OpenRouter key / Telegram bot token / Tailscale auth key / Brave Search API key (all sensitive), OpenRouter model slug, budget alert email, etc. No IP variable — there's no IP-locked rule left to configure. |
-| `main.tf` | The resources: security group with **no ingress rules**, IAM instance role + SSM/KMS/CloudWatch/Session Manager permissions, SSM SecureStrings for the OpenRouter key/Telegram token/Tailscale auth key, EC2 instance (AL2023 arm64) with `user_data` that joins Tailscale and installs the agent on first boot, separate EBS volume + attachment for memory, DLM daily-snapshot policy, AWS Budget alert |
-| `templates/user_data.sh.tpl` | The instance's first-boot script, rendered by `main.tf` via `templatefile()`: joins Tailscale, attaches/formats/mounts the memory volume at `/mnt/memory`, then installs and starts the `hermes-agent` systemd service — the actual Telegram-long-polling/OpenRouter process, at `/opt/hermes-agent/agent.py` on the instance. The agent process also calls two tools directly (not via OpenRouter or MCP): `web_search`, a plain HTTPS call to the Brave Search API, and `get_time`, a purely local read of the instance's system clock. See [Step 4](../README.md#4-hermes-persistent-memory) and [Step 5](../README.md#5-connecting-with-telegram) in the top-level README for what it does at runtime. |
+| `variables.tf` | Inputs: EC2 key pair name, instance/volume sizing, OpenRouter key / Telegram bot token / Tailscale auth key (all sensitive), optional backwards-compatible Google key, OpenRouter model slug, and budget alert email. |
+| `main.tf` | The resources: security group with **no ingress rules**, IAM instance role + SSM/KMS/CloudWatch/Session Manager permissions, SSM SecureStrings for the OpenRouter key/Telegram token/Tailscale auth key plus an unused backwards-compatible Google-key parameter, EC2 instance (AL2023 arm64) with `user_data` that joins Tailscale and installs the agent on first boot, separate EBS volume + attachment for memory, DLM daily-snapshot policy, AWS Budget alert |
+| `templates/user_data.sh.tpl` | The instance's first-boot script, rendered by `main.tf` via `templatefile()`: installs the ARM64 static `ffmpeg` build needed for Telegram Ogg/Opus voice notes, joins Tailscale, attaches/formats/mounts the memory volume at `/mnt/memory`, installs the official [NousResearch Hermes Agent CLI](https://github.com/NousResearch/hermes-agent) from its repository, and starts its `gateway run` process as the `hermes-agent` systemd service. Hermes sends native tool schemas to OpenRouter, executes returned tool calls locally, and feeds results back to the model. See [Step 4](../README.md#4-hermes-persistent-memory) and [Step 5](../README.md#5-connecting-with-telegram) in the top-level README for what it does at runtime. |
 | `outputs.tf` | Instance ID, public IP (outbound use only), instructions for finding the instance's Tailscale IP for SSH, a ready-to-use Session Manager fallback command, memory volume ID, SSM parameter names |
 | `terraform.tfvars.example` | Template for the values you need to fill in |
 | `.terraform.lock.hcl` | Provider version lock — commit this, it's not a secret |
@@ -62,29 +63,28 @@ values and resource references flow between them:
 | `openrouter_api_key` | **Yes** (passed as an env var, not in `.tfvars`) | Your OpenRouter API key, stored as a SecureString in SSM Parameter Store. Never commit this or put it in `terraform.tfvars`, see below. |
 | `telegram_bot_token` | **Yes** (passed as an env var, not in `.tfvars`) | Your Telegram bot token from [@BotFather](https://t.me/BotFather), stored as a SecureString in SSM Parameter Store. Used for long polling, so no inbound webhook is required. |
 | `tailscale_auth_key` | **Yes** (passed as an env var, not in `.tfvars`) | A [Tailscale auth key](https://tailscale.com/kb/1085/auth-keys) used to join the instance to your tailnet on first boot, stored as a SecureString in SSM Parameter Store. This is what gives you a stable IP for admin access no matter where you're connecting from. |
-| `brave_api_key` | **Yes** (passed as an env var, not in `.tfvars`) | A [Brave Search API](https://api.search.brave.com/app/keys) key, stored as a SecureString in SSM Parameter Store. Used by the agent's `web_search` tool; free tier covers 2,000 queries/month. |
+| `google_api_key` | No | Optional backwards-compatible Google AI Studio key for a manual future switch to Gemini. The default Microsoft Edge TTS provider needs no API key. |
 | `aws_region` | No (default `eu-west-2`) | AWS region to deploy into. |
 | `project_name` | No (default `hermes-personalize`) | Name prefix used to tag and identify all resources. |
-| `instance_type` | No (default `t4g.micro`) | EC2 instance type. Move to `t4g.small` if the memory store grows (e.g. a real vector DB). |
-| `root_volume_size_gb` | No (default `8`) | OS root volume size, holds the OS only, not agent memory. |
+| `instance_type` | No (default `t4g.small`) | EC2 instance type sized for the full Hermes Agent CLI runtime and its local tools. |
+| `root_volume_size_gb` | No (default `20`) | OS root volume for Amazon Linux and the Hermes runtime; persistent Hermes state remains on the separate memory volume. |
 | `data_volume_size_gb` | No (default `20`) | Size of the separate EBS volume that holds long-term agent memory. |
 | `snapshot_retention_days` | No (default `14`) | How many daily snapshots of the memory volume to retain. |
-| `openrouter_model` | No (default `meta-llama/llama-3.3-70b-instruct`) | OpenRouter model slug the agent calls for chat completions. Defaults to Llama 3.3 70B rather than a Nous Hermes model because none of OpenRouter's Hermes endpoints currently support the `tools` parameter the agent's `web_search`/`get_time` tools need (check a given model's `supported_parameters` via `https://openrouter.ai/api/v1/models/<author>/<slug>/endpoints` before switching). Llama 3.3 70B was tuned by Meta to match Llama 3.1 405B's quality at much lower cost, and is cheaper than Hermes 3 405B on both prompt and completion pricing. Check [openrouter.ai/models](https://openrouter.ai/models) for the current catalog, context length, and pricing before changing this. Changing it updates `user_data`, which only affects instances launched *after* the next `apply` (see the note on `templatefile()` changes and instance replacement above), not the currently running one. |
-| `budget_limit_usd` | No (default `15`) | Monthly AWS Budget alert threshold in USD. |
+| `openrouter_model` | No (default `deepseek/deepseek-v4-pro`) | OpenRouter model slug used by the official Hermes Agent CLI. Hermes uses OpenRouter's native tool-calling protocol with this model, then executes the returned calls on the instance. Check [openrouter.ai/models](https://openrouter.ai/models) for the current catalog, context length, pricing, and tool support before changing this. Changing it updates `user_data`, which only affects instances launched *after* the next `apply` (see the note on `templatefile()` changes and instance replacement above), not the currently running one. |
+| `budget_limit_usd` | No (default `25`) | Monthly AWS Budget alert threshold in USD, above expected always-on infrastructure cost (excluding OpenRouter usage). |
 | `enable_cloudwatch_logs` | No (default `true`) | Whether to create a CloudWatch Logs group for the agent process. |
 
 ## Usage
 
 1. `cp terraform.tfvars.example terraform.tfvars` and fill in `key_name` and
-   `budget_alert_email`. **Do not** put any of the four secrets below in this file.
+   `budget_alert_email`. **Do not** put any of the three required secrets below in this file.
 2. `terraform init`
-3. Export the four secrets as environment variables, in this same shell, so none of
+3. Export the three required secrets as environment variables, in this same shell, so none of
    them are written to `terraform.tfvars` or typed at a prompt:
    ```bash
    export TF_VAR_openrouter_api_key="sk-or-..."
    export TF_VAR_telegram_bot_token="123456:ABC-your-botfather-token"
    export TF_VAR_tailscale_auth_key="tskey-auth-..."
-   export TF_VAR_brave_api_key="BSA..."
    ```
 4. Review the plan:
    ```bash
@@ -99,7 +99,7 @@ values and resource references flow between them:
    Type `yes` when prompted to confirm.
 6. Optionally, clear the secrets from your shell once you're done:
    ```bash
-   unset TF_VAR_openrouter_api_key TF_VAR_telegram_bot_token TF_VAR_tailscale_auth_key TF_VAR_brave_api_key
+   unset TF_VAR_openrouter_api_key TF_VAR_telegram_bot_token TF_VAR_tailscale_auth_key
    ```
 
 `terraform.tfvars`, `*.tfstate`, and `.terraform/` are gitignored — never commit them.
@@ -148,11 +148,11 @@ set. If you do end up at this prompt, here's which value goes with which name:
 | `var.openrouter_api_key` | Your OpenRouter API key, starts with `sk-or-` |
 | `var.telegram_bot_token` | Your Telegram bot token from [@BotFather](https://t.me/BotFather), looks like `123456:ABC-...` |
 | `var.tailscale_auth_key` | Your [Tailscale auth key](https://tailscale.com/kb/1085/auth-keys), starts with `tskey-auth-` |
-| `var.brave_api_key` | Your [Brave Search API](https://api.search.brave.com/app/keys) key, starts with `BSA` |
+| `var.google_api_key` | Optional [Google AI Studio API key](https://aistudio.google.com/app/apikey) retained only for a manual future Gemini TTS switch. |
 
 ## Rotating secrets
 
-To rotate any of the four secrets later, update them directly in SSM Parameter Store
+To rotate any of the three runtime secrets later, update them directly in SSM Parameter Store
 (console or `aws ssm put-parameter --overwrite`) rather than via Terraform — each
 parameter's `lifecycle.ignore_changes` is set (see `main.tf`) so `terraform apply` won't
 stomp on a manual rotation, and won't push a rotated value back to whatever's still in

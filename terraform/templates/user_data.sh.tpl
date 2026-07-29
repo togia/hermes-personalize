@@ -4,6 +4,25 @@ set -euxo pipefail
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 
+dnf install -y git
+
+# Amazon Linux 2023 does not provide an ffmpeg package in its standard ARM64
+# repositories. Hermes needs ffmpeg to turn Edge TTS's MP3 output into
+# Ogg/Opus; its Telegram adapter then uses the native sendVoice route for an
+# inline voice note. Install the upstream ARM64 static build so this does not
+# depend on a third-party RPM repo.
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  FFMPEG_ARCHIVE=/tmp/ffmpeg-release-arm64-static.tar.xz
+  FFMPEG_DIR=$(mktemp -d)
+  curl -fL --retry 3 --retry-delay 2 \
+    -o "$FFMPEG_ARCHIVE" \
+    https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz
+  tar -xJf "$FFMPEG_ARCHIVE" -C "$FFMPEG_DIR"
+  install -m 0755 "$FFMPEG_DIR"/*/ffmpeg /usr/local/bin/ffmpeg
+  install -m 0755 "$FFMPEG_DIR"/*/ffprobe /usr/local/bin/ffprobe
+  rm -rf "$FFMPEG_ARCHIVE" "$FFMPEG_DIR"
+fi
+
 curl -fsSL https://tailscale.com/install.sh | sh
 systemctl enable --now tailscaled
 
@@ -55,6 +74,14 @@ for i in $(seq 1 12); do
   sleep 10
 done
 
+# This volume is attached outside the launch template so it can survive an ASG
+# replacement. Make the default explicit: termination of this instance must
+# never delete the persistent Hermes memory volume.
+aws ec2 modify-instance-attribute \
+  --instance-id "$INSTANCE_ID" \
+  --region "${aws_region}" \
+  --block-device-mappings '[{"DeviceName":"/dev/sdf","Ebs":{"DeleteOnTermination":false}}]'
+
 # --- Format (once) and mount the persistent memory volume ---
 # Nitro instances (all current-gen types, including t4g) expose EBS volumes as
 # NVMe devices whose /dev/nvmeXn1 enumeration isn't guaranteed to match the
@@ -85,11 +112,7 @@ grep -q "$MEMORY_DEVICE" /etc/fstab || echo "$MEMORY_DEVICE $MEMORY_MOUNT ext4 d
 mkdir -p "$MEMORY_MOUNT/conversations"
 chown -R ec2-user:ec2-user "$MEMORY_MOUNT"
 
-# --- Install the agent runtime ---
-dnf install -y python3 python3-pip
-pip3 install --no-cache-dir requests
-
-# --- Fetch the remaining two secrets (Tailscale's own key was already fetched above) ---
+# --- Fetch the Hermes Agent credentials (Tailscale's key was fetched above) ---
 # Same set +x/-x reasoning as the Tailscale key fetch above: don't let bash's
 # trace echo decrypted secrets into the script's own console output.
 set +x
@@ -113,373 +136,49 @@ for i in $(seq 1 5); do
   sleep 5
 done
 
-for i in $(seq 1 5); do
-  BRAVE_KEY=$(aws ssm get-parameter \
-    --name "${brave_key_param_name}" \
-    --with-decryption \
-    --region "${aws_region}" \
-    --query "Parameter.Value" \
-    --output text) && break
-  sleep 5
-done
+set -x
 
-cat >/etc/hermes-agent.env <<EOF
+# --- Install and configure the official NousResearch Hermes Agent CLI ---
+# HERMES_HOME is on the persistent volume, so the CLI's configuration, sessions,
+# skills, and memories survive replacement of the EC2 instance.
+HERMES_HOME="$MEMORY_MOUNT/hermes"
+mkdir -p "$HERMES_HOME"
+
+# Seed the CLI's own environment before its non-interactive install. The
+# installer does not overwrite an existing .env, and the gateway loads these
+# credentials directly from HERMES_HOME.
+cat >"$HERMES_HOME/.env" <<EOF
 OPENROUTER_API_KEY=$OPENROUTER_KEY
 TELEGRAM_BOT_TOKEN=$TELEGRAM_TOKEN
-OPENROUTER_MODEL=${openrouter_model}
-BRAVE_API_KEY=$BRAVE_KEY
-MEMORY_DIR=$MEMORY_MOUNT
 EOF
-set -x
-chown ec2-user:ec2-user /etc/hermes-agent.env
-chmod 600 /etc/hermes-agent.env
+chown -R ec2-user:ec2-user "$HERMES_HOME"
+chmod 600 "$HERMES_HOME/.env"
 
-# --- Install the agent itself ---
-mkdir -p /opt/hermes-agent
-cat >/opt/hermes-agent/agent.py <<'PYEOF'
-#!/usr/bin/env python3
-"""Long-polls Telegram for messages and answers them via a Hermes model on OpenRouter.
+# Install from the NousResearch repository, rather than the old local Python
+# loop above. Hermes owns the native tool-calling loop: it sends the tool
+# schemas to OpenRouter, receives tool calls, executes them locally, and
+# supplies results to the model.
+runuser -l ec2-user -c "HERMES_HOME='$HERMES_HOME' curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash -s -- --non-interactive --skip-setup --skip-browser --hermes-home '$HERMES_HOME'"
 
-Conversation history is kept as one flat JSON file per chat under MEMORY_DIR,
-per the design in docs/infra.md — no database, just files on the persistent
-EBS volume, trimmed to the most recent messages to bound both disk use and
-the size (cost) of each OpenRouter request.
-"""
-import datetime
-import json
-import os
-import time
+HERMES_BIN=/home/ec2-user/.local/bin/hermes
+runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set model.provider openrouter"
+runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set model.default '${openrouter_model}'"
+runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set tts.provider edge"
+runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set tts.edge.voice en-GB-SoniaNeural"
 
-import requests
-
-OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-OPENROUTER_MODEL = os.environ["OPENROUTER_MODEL"]
-BRAVE_API_KEY = os.environ["BRAVE_API_KEY"]
-MEMORY_DIR = os.environ.get("MEMORY_DIR", "/mnt/memory")
-
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
-BRAVE_SEARCH_API = "https://api.search.brave.com/res/v1/web/search"
-
-OFFSET_FILE = os.path.join(MEMORY_DIR, "telegram_offset.txt")
-CONVERSATIONS_DIR = os.path.join(MEMORY_DIR, "conversations")
-MAX_HISTORY_MESSAGES = 20
-MAX_TOOL_ROUNDS = 5  # bounds how many tool round-trips one reply can trigger
-SYSTEM_PROMPT = (
-    "You are a helpful personal assistant, replying concisely over Telegram. "
-    "This is a private, single-user conversation, and the full history of it is "
-    "persisted to disk and passed back to you on every turn -- there is no privacy "
-    "feature or policy that erases or withholds anything the user has told you. "
-    "Treat facts the user shares (their name for you, preferences, etc.) as "
-    "durably remembered, and use them in later replies rather than claiming you "
-    "can't retain them. You have tools available (web_search, get_time, "
-    "get_weather) -- use them when they'd give a better answer than what you "
-    "already know, instead of guessing or saying you can't look things up. "
-    "Always use get_weather for weather questions, never web_search -- web "
-    "search results are generic page snippets that don't contain real forecast "
-    "numbers. If a place name is ambiguous (e.g. Athens could mean Athens, "
-    "Greece or Athens, Georgia), ask which one instead of guessing."
-)
-
-os.makedirs(CONVERSATIONS_DIR, exist_ok=True)
-
-
-def web_search(query):
-    response = requests.get(
-        BRAVE_SEARCH_API,
-        headers={"Accept": "application/json", "X-Subscription-Token": BRAVE_API_KEY},
-        params={"q": query, "count": 5},
-        timeout=15,
-    )
-    response.raise_for_status()
-    results = response.json().get("web", {}).get("results", [])[:5]
-    if not results:
-        return "No results found."
-    return "\n".join(
-        f"- {r.get('title')}: {r.get('description', '')} ({r.get('url')})"
-        for r in results
-    )
-
-
-def get_time():
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-
-def get_weather(location):
-    geocode = requests.get(
-        "https://geocoding-api.open-meteo.com/v1/search",
-        params={"name": location, "count": 1},
-        timeout=15,
-    )
-    geocode.raise_for_status()
-    results = geocode.json().get("results")
-    if not results:
-        return f"Couldn't find a location matching '{location}'."
-    place = results[0]
-    label = ", ".join(
-        part for part in [place.get("name"), place.get("admin1"), place.get("country")] if part
-    )
-
-    forecast = requests.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": place["latitude"],
-            "longitude": place["longitude"],
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-            "timezone": "auto",
-            "forecast_days": 3,
-        },
-        timeout=15,
-    )
-    forecast.raise_for_status()
-    daily = forecast.json().get("daily", {})
-    dates = daily.get("time", [])
-    if not dates:
-        return f"No forecast data available for {label}."
-
-    lines = [f"Forecast for {label}:"]
-    for i, date in enumerate(dates):
-        lines.append(
-            f"- {date}: high {daily['temperature_2m_max'][i]}°C, "
-            f"low {daily['temperature_2m_min'][i]}°C, "
-            f"precipitation chance {daily['precipitation_probability_max'][i]}%"
-        )
-    return "\n".join(lines)
-
-
-TOOLS = {
-    "web_search": {
-        "schema": {
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": (
-                    "Search the public web and return the top results (title, "
-                    "snippet, URL) for a query. Use this for current events, "
-                    "facts you're unsure of, or anything needing up-to-date "
-                    "information."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query."},
-                    },
-                    "required": ["query"],
-                },
-            },
-        },
-        "fn": lambda query: web_search(query),
-    },
-    "get_time": {
-        "schema": {
-            "type": "function",
-            "function": {
-                "name": "get_time",
-                "description": "Get the current date and time (UTC).",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        },
-        "fn": lambda: get_time(),
-    },
-    "get_weather": {
-        "schema": {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": (
-                    "Get a real, structured 3-day weather forecast (high/low "
-                    "temperature in Celsius, precipitation chance) for a named "
-                    "location. Use this instead of web_search for any weather "
-                    "question -- web_search only returns generic page snippets "
-                    "that don't actually contain forecast numbers."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {
-                            "type": "string",
-                            "description": "City name, optionally with country, e.g. 'Athens, Greece'.",
-                        },
-                    },
-                    "required": ["location"],
-                },
-            },
-        },
-        "fn": lambda location: get_weather(location),
-    },
-}
-
-
-def load_offset():
-    if os.path.exists(OFFSET_FILE):
-        with open(OFFSET_FILE) as f:
-            return int(f.read().strip() or 0)
-    return 0
-
-
-def save_offset(offset):
-    with open(OFFSET_FILE, "w") as f:
-        f.write(str(offset))
-
-
-def history_path(chat_id):
-    return os.path.join(CONVERSATIONS_DIR, f"{chat_id}.json")
-
-
-def load_history(chat_id):
-    path = history_path(chat_id)
-    if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return []
-
-
-def save_history(chat_id, history):
-    with open(history_path(chat_id), "w") as f:
-        json.dump(history[-MAX_HISTORY_MESSAGES:], f)
-
-
-def call_tool(name, arguments_json):
-    tool = TOOLS.get(name)
-    if tool is None:
-        return f"Unknown tool: {name}"
-    try:
-        args = json.loads(arguments_json or "{}")
-        return tool["fn"](**args)
-    except Exception as exc:
-        return f"Tool call failed: {exc}"
-
-
-def ask_openrouter(history, text):
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": text})
-
-    # Tool calls happen in-band with the model: it replies with tool_calls instead
-    # of content, we execute them locally (the model has no way to reach the
-    # network itself) and feed the results back, looping until it answers with
-    # plain content. MAX_TOOL_ROUNDS bounds this in case it keeps calling tools.
-    for _ in range(MAX_TOOL_ROUNDS):
-        response = requests.post(
-            OPENROUTER_API,
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "X-Title": "hermes-personalize",
-            },
-            json={
-                "model": OPENROUTER_MODEL,
-                "messages": messages,
-                "tools": [tool["schema"] for tool in TOOLS.values()],
-                # require_parameters alone isn't enough: some providers list
-                # "tools" as a supported parameter but don't reliably honor it
-                # (they echo the model's raw function-call attempt back as
-                # plain text content instead of a real tool_calls response).
-                # Measured empirically against this model -- groq, together,
-                # nebius, and google-vertex consistently returned real
-                # tool_calls; coreweave and deepinfra did not. Re-verify this
-                # list if OPENROUTER_MODEL changes.
-                "provider": {
-                    "require_parameters": True,
-                    "order": ["groq", "together", "nebius", "google-vertex", "novita"],
-                    "allow_fallbacks": False,
-                },
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        message = response.json()["choices"][0]["message"]
-
-        tool_calls = message.get("tool_calls")
-        if not tool_calls:
-            return message["content"]
-
-        messages.append(message)
-        for call in tool_calls:
-            result = call_tool(call["function"]["name"], call["function"]["arguments"])
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call["id"],
-                "name": call["function"]["name"],
-                "content": str(result),
-            })
-
-    return "Sorry, I couldn't finish that after several tool calls."
-
-
-def send_telegram_message(chat_id, text):
-    requests.post(
-        f"{TELEGRAM_API}/sendMessage",
-        json={"chat_id": chat_id, "text": text},
-        timeout=30,
-    )
-
-
-def handle_update(update):
-    message = update.get("message")
-    if not message or "text" not in message:
-        return
-    chat_id = message["chat"]["id"]
-    text = message["text"]
-
-    history = load_history(chat_id)
-    try:
-        reply = ask_openrouter(history, text)
-    except Exception as exc:
-        print(f"OpenRouter call failed: {exc}", flush=True)
-        reply = "Sorry, I hit an error talking to the model. Try again in a moment."
-
-    history.append({"role": "user", "content": text})
-    history.append({"role": "assistant", "content": reply})
-    save_history(chat_id, history)
-
-    send_telegram_message(chat_id, reply)
-
-
-def main():
-    offset = load_offset()
-    print(f"hermes-agent starting, offset={offset}, model={OPENROUTER_MODEL}", flush=True)
-    while True:
-        try:
-            response = requests.get(
-                f"{TELEGRAM_API}/getUpdates",
-                params={"offset": offset, "timeout": 30},
-                timeout=35,
-            )
-            response.raise_for_status()
-            updates = response.json().get("result", [])
-        except Exception as exc:
-            print(f"getUpdates failed: {exc}", flush=True)
-            time.sleep(5)
-            continue
-
-        for update in updates:
-            offset = update["update_id"] + 1
-            try:
-                handle_update(update)
-            except Exception as exc:
-                print(f"Failed to handle update {update.get('update_id')}: {exc}", flush=True)
-            save_offset(offset)
-
-
-if __name__ == "__main__":
-    main()
-PYEOF
-chown -R ec2-user:ec2-user /opt/hermes-agent
-
-# --- Run it as a supervised, auto-restarting service ---
-cat >/etc/systemd/system/hermes-agent.service <<'UNITEOF'
+# --- Run the official CLI gateway as a supervised, auto-restarting service ---
+cat >/etc/systemd/system/hermes-agent.service <<UNITEOF
 [Unit]
-Description=Hermes personalize Telegram/OpenRouter agent
+Description=NousResearch Hermes Agent gateway (Telegram)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=ec2-user
-EnvironmentFile=/etc/hermes-agent.env
-ExecStart=/usr/bin/python3 /opt/hermes-agent/agent.py
+Environment=HOME=/home/ec2-user
+Environment=HERMES_HOME=$HERMES_HOME
+ExecStart=$HERMES_BIN gateway run
 Restart=always
 RestartSec=5
 

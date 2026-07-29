@@ -120,7 +120,6 @@ data "aws_iam_policy_document" "agent_permissions" {
       aws_ssm_parameter.openrouter_key.arn,
       aws_ssm_parameter.telegram_bot_token.arn,
       aws_ssm_parameter.tailscale_auth_key.arn,
-      aws_ssm_parameter.brave_api_key.arn,
     ]
   }
 
@@ -180,6 +179,14 @@ data "aws_iam_policy_document" "agent_permissions" {
     ]
   }
 
+  # Set the attached memory disk to survive an instance replacement. The
+  # first-boot script uses this only to set DeleteOnTermination=false.
+  statement {
+    sid       = "KeepMemoryVolumeOnInstanceTermination"
+    actions   = ["ec2:ModifyInstanceAttribute"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${data.aws_caller_identity.current.account_id}:instance/*"]
+  }
+
   dynamic "statement" {
     for_each = var.enable_cloudwatch_logs ? [1] : []
     content {
@@ -211,7 +218,7 @@ resource "aws_cloudwatch_log_group" "agent" {
   tags              = local.tags
 }
 
-# --- Secrets: OpenRouter API key, Telegram bot token, Tailscale auth key, Brave Search API key ---
+# --- Runtime secrets: OpenRouter API key, Telegram bot token, Tailscale auth key ---
 
 resource "aws_ssm_parameter" "openrouter_key" {
   name        = "/${var.project_name}/openrouter-api-key"
@@ -251,11 +258,11 @@ resource "aws_ssm_parameter" "tailscale_auth_key" {
   }
 }
 
-resource "aws_ssm_parameter" "brave_api_key" {
-  name        = "/${var.project_name}/brave-api-key"
-  description = "Brave Search API key used by the agent's web_search tool."
+resource "aws_ssm_parameter" "google_api_key" {
+  name        = "/${var.project_name}/google-api-key"
+  description = "Optional Google AI Studio API key retained for a manual Gemini TTS switch."
   type        = "SecureString"
-  value       = var.brave_api_key
+  value       = var.google_api_key != "" ? var.google_api_key : "not-configured"
   tags        = local.tags
 
   lifecycle {
@@ -323,7 +330,6 @@ resource "aws_launch_template" "agent" {
     auth_key_param_name       = aws_ssm_parameter.tailscale_auth_key.name
     openrouter_key_param_name = aws_ssm_parameter.openrouter_key.name
     telegram_token_param_name = aws_ssm_parameter.telegram_bot_token.name
-    brave_key_param_name      = aws_ssm_parameter.brave_api_key.name
     openrouter_model          = var.openrouter_model
     project_name              = var.project_name
     memory_volume_id          = aws_ebs_volume.memory.id
@@ -401,8 +407,9 @@ resource "aws_ebs_volume" "memory" {
     Backup = "true" # matched by the DLM target_tags below
   })
 
-  # Requires `terraform destroy -target` gymnastics (or removing this block first) to
-  # actually delete the memory volume — that friction is intentional, not a bug.
+  # Requires temporarily removing this guard before a full `terraform destroy`.
+  # The runtime attachment is handled by user_data, not a launch-template block
+  # device mapping, so it remains independent of instance deletion.
   lifecycle {
     prevent_destroy = true
   }

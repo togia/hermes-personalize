@@ -38,7 +38,7 @@ output "tailscale_parameter_name" {
   value       = aws_ssm_parameter.tailscale_auth_key.name
 }
 
-output "brave_parameter_name" {
-  description = "SSM Parameter Store name for the Brave Search API key."
-  value       = aws_ssm_parameter.brave_api_key.name
+output "google_api_parameter_name" {
+  description = "SSM Parameter Store name retained for an optional future Gemini TTS configuration."
+  value       = aws_ssm_parameter.google_api_key.name
 }

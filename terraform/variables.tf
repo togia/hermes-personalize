@@ -16,15 +16,15 @@ variable "key_name" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type. t4g.micro is the recommended starting point; move to t4g.small if the memory store grows (e.g. a real vector DB)."
+  description = "EC2 instance type. t4g.small is the recommended starting point for the official Hermes Agent CLI's Node.js and Python runtime."
   type        = string
-  default     = "t4g.micro"
+  default     = "t4g.small"
 }
 
 variable "root_volume_size_gb" {
-  description = "Size of the OS root volume in GB. This holds the OS only, not agent memory."
+  description = "Size of the OS root volume in GB. Holds the OS and the Hermes Agent CLI runtime; persistent agent state is stored separately on the memory volume."
   type        = number
-  default     = 8
+  default     = 20
 }
 
 variable "data_volume_size_gb" {
@@ -64,24 +64,27 @@ variable "tailscale_auth_key" {
   sensitive   = true
 }
 
-variable "openrouter_model" {
-  description = "OpenRouter model slug the agent calls for chat completions. Defaults to meta-llama/llama-3.3-70b-instruct rather than a Nous Hermes model: as of writing, none of OpenRouter's Hermes endpoints support the \"tools\" parameter the agent's web_search/get_time tools rely on (verified via https://openrouter.ai/api/v1/models/nousresearch/hermes-3-llama-3.1-405b/endpoints), while Llama 3.3 70B does, was tuned by Meta to match Llama 3.1 405B's quality at a fraction of the cost, and is cheaper than Hermes 3 405B on both prompt and completion pricing. See https://openrouter.ai/models for the current catalog, context length, pricing, and per-model tool support before changing this."
+# Retained only for backwards compatibility with existing deployments that
+# previously used Gemini TTS. Edge is the default and needs no API key.
+variable "google_api_key" {
+  description = "Optional Google AI Studio API key retained for a manual future switch to Gemini TTS; Edge TTS is the default."
   type        = string
-  default     = "meta-llama/llama-3.3-70b-instruct"
+  sensitive   = true
+  default     = ""
+}
+
+variable "openrouter_model" {
+  description = "OpenRouter model slug the official NousResearch Hermes Agent CLI uses for chat completions and native tool calling. Defaults to DeepSeek V4 Pro, which supports tool calling through OpenRouter. See https://openrouter.ai/models for the current catalog, context length, pricing, and per-model tool support before changing this."
+  type        = string
+  default     = "deepseek/deepseek-v4-pro"
 }
 
 # Same reasoning as the other three secrets above: never in tfvars or version control.
-# Pass via TF_VAR_brave_api_key at apply time. Used by the agent's web_search tool.
-variable "brave_api_key" {
-  description = "Brave Search API key, stored as a SecureString in SSM Parameter Store. Used by the agent's web_search tool. Get one at https://api.search.brave.com/app/keys (free tier: 2,000 queries/month)."
-  type        = string
-  sensitive   = true
-}
 
 variable "budget_limit_usd" {
-  description = "Monthly AWS Budget alert threshold in USD."
+  description = "Monthly AWS Budget alert threshold in USD. The default covers expected always-on t4g.small infrastructure cost, excluding OpenRouter usage."
   type        = number
-  default     = 15
+  default     = 25
 }
 
 variable "budget_alert_email" {

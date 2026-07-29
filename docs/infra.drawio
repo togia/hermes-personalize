@@ -1,6 +1,6 @@
 <mxfile host="65bd71144e">
     <diagram id="hermes-personalize-infra" name="Hermes Personalize Infra">
-        <mxGraphModel dx="847" dy="814" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1200" math="0" shadow="0">
+        <mxGraphModel dx="801" dy="1058" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2000" pageHeight="1200" math="0" shadow="0">
             <root>
                 <mxCell id="0"/>
                 <mxCell id="1" parent="0"/>
@@ -10,7 +10,7 @@
                 <mxCell id="tailscale" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=10;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" value="Tailscale&#xa;Coordination + DERP relay (SaaS)" vertex="1">
                     <mxGeometry height="100" width="205" x="1400" y="500" as="geometry"/>
                 </mxCell>
-                <mxCell id="openrouter" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=10;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" value="OpenRouter API&#xa;Nous Hermes inference" vertex="1">
+                <mxCell id="openrouter" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=10;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" value="OpenRouter API&#xa;DeepSeek V4 Pro&#xa;Native tool calling" vertex="1">
                     <mxGeometry height="100" width="205" x="1400" y="240" as="geometry"/>
                 </mxCell>
                 <mxCell id="user" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=8;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" value="You (laptop + phone)&#xa;via Tailscale — stable private IP" vertex="1">
@@ -32,15 +32,15 @@
                     <mxGeometry height="62" width="530" x="540" y="245" as="geometry"/>
                 </mxCell>
                 <mxCell id="asg" parent="1" style="rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=center;spacingLeft=10;spacingTop=8;fillColor=none;strokeColor=#ed7100;strokeWidth=2;dashed=1;dashPattern=6 4;fontStyle=1;fontColor=#7a3d00;fontSize=12;" value="Auto Scaling Group · min=max=1 (self-healing)" vertex="1">
-                    <mxGeometry height="260" width="330" x="530" y="320" as="geometry"/>
+                    <mxGeometry height="290" width="330" x="530" y="320" as="geometry"/>
                 </mxCell>
-                <mxCell id="ec2" parent="1" style="shape=mxgraph.aws4.ec2;fillColor=#ed7100;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="Amazon EC2&#xa;t4g.micro · Hermes agent" vertex="1">
+                <mxCell id="ec2" parent="1" style="shape=mxgraph.aws4.ec2;fillColor=#ed7100;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="Amazon EC2&#xa;t4g.small · Hermes Agent CLI&#xa;gateway + local tools" vertex="1">
                     <mxGeometry height="155" width="160" x="570" y="370" as="geometry"/>
                 </mxCell>
-                <mxCell id="ebs" parent="1" style="shape=mxgraph.aws4.elastic_block_store;fillColor=#3f8624;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="Amazon EBS&#xa;Encrypted gp3 memory" vertex="1">
+                <mxCell id="ebs" parent="1" style="shape=mxgraph.aws4.elastic_block_store;fillColor=#3f8624;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="Amazon EBS&#xa;20 GB encrypted gp3&#xa;HERMES_HOME memory" vertex="1">
                     <mxGeometry height="155" width="160" x="870" y="610" as="geometry"/>
                 </mxCell>
-                <mxCell id="ssm" parent="1" style="shape=mxgraph.aws4.parameter_store;fillColor=#e7157b;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="SSM Parameter Store&#xa;SecureStrings: OpenRouter, Telegram, Tailscale" vertex="1">
+                <mxCell id="ssm" parent="1" style="shape=mxgraph.aws4.parameter_store;fillColor=#e7157b;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="SSM Parameter Store&#xa;SecureStrings: OpenRouter, Telegram, Tailscale, Google AI" vertex="1">
                     <mxGeometry height="130" width="130" x="520" y="660" as="geometry"/>
                 </mxCell>
                 <mxCell id="dlm" parent="1" style="shape=mxgraph.aws4.elastic_block_store_amazon_data_lifecycle_manager;fillColor=#3f8624;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="Amazon Data Lifecycle Manager" vertex="1">
@@ -49,7 +49,7 @@
                 <mxCell id="cw" parent="1" style="shape=mxgraph.aws4.cloudwatch;fillColor=#e7157b;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="Amazon CloudWatch&#xa;Optional logs" vertex="1">
                     <mxGeometry height="100" width="160" x="680" y="650" as="geometry"/>
                 </mxCell>
-                <mxCell id="budget" parent="1" style="shape=mxgraph.aws4.budgets;fillColor=#e7157b;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="AWS Budgets&#xa;$15/month alert" vertex="1">
+                <mxCell id="budget" parent="1" style="shape=mxgraph.aws4.budgets;fillColor=#e7157b;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="AWS Budgets&#xa;$25/month alert" vertex="1">
                     <mxGeometry height="100" width="160" x="680" y="840" as="geometry"/>
                 </mxCell>
                 <mxCell id="s3" parent="1" style="shape=mxgraph.aws4.s3;fillColor=#3f8624;gradientColor=none;verticalLabelPosition=bottom;verticalAlign=top;align=center;fontColor=#16191f;fontSize=12;fontStyle=1;spacingTop=7;whiteSpace=wrap;html=1;" value="Amazon S3&#xa;Snapshot storage" vertex="1">
