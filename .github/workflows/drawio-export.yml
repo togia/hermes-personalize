@@ -30,6 +30,7 @@ jobs:
           path: docs
           output: export
           format: svg
+          transparent: false
           remove-page-suffix: true
           action-mode: all
 
