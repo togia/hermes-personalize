@@ -10,7 +10,7 @@
                 <mxCell id="tailscale" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=10;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" value="Tailscale&#xa;Coordination + DERP relay (SaaS)" vertex="1">
                     <mxGeometry height="100" width="205" x="1400" y="500" as="geometry"/>
                 </mxCell>
-                <mxCell id="openrouter" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=10;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" value="OpenRouter API&#xa;DeepSeek V4 Pro&#xa;Native tool calling" vertex="1">
+                <mxCell id="openrouter" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=10;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" value="OpenRouter API&#xa;DeepSeek V4 Pro: chat + tools&#xa;Qwen3 VL 32B: vision" vertex="1">
                     <mxGeometry height="100" width="205" x="1400" y="240" as="geometry"/>
                 </mxCell>
                 <mxCell id="user" parent="1" style="rounded=1;whiteSpace=wrap;html=1;align=center;verticalAlign=middle;spacing=8;fillColor=#f2f8ff;strokeColor=#0972d3;strokeWidth=2;fontColor=#16191f;fontSize=13;fontStyle=1;" value="You (laptop + phone)&#xa;via Tailscale — stable private IP" vertex="1">

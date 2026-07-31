@@ -310,9 +310,9 @@ Two things worth knowing before you reach for this:
   `terraform output instance_id` with `aws ssm start-session` yourself.**
   `instance_id` is a snapshot from the last `terraform apply`/`refresh` — if
   the self-healing ASG has replaced the instance since then (a health-check
-  failure, or a manual `start-instance-refresh` you ran outside Terraform,
-  e.g. after changing `templates/user_data.sh.tpl` or `openrouter_model` — see
-  [terraform/README.md](./terraform/README.md#changing-the-agent-script-or-openrouter_model)),
+  failure, or Terraform's automatic instance refresh after changing
+  `templates/user_data.sh.tpl`, `openrouter_model`, or `vision_openrouter_model` — see
+  [terraform/README.md](./terraform/README.md#changing-the-agent-script-or-model-configuration)),
   that output is stale and points at an instance that's already gone.
   `session_manager_command` looks the instance up live by its `Name` tag each
   time instead, so it's correct even when Terraform's own state isn't.
@@ -365,8 +365,10 @@ endpoint, inbound security-group rule, load balancer, or API Gateway.
 For each incoming message, the official [NousResearch Hermes Agent CLI](https://github.com/NousResearch/hermes-agent)
 loads its persistent state from `/mnt/memory/hermes`, sends the conversation to
 OpenRouter, and replies on Telegram. The default model is
-`deepseek/deepseek-v4-pro`; see [terraform/README.md](./terraform/README.md#variables)
-to change it.
+`deepseek/deepseek-v4-pro`. Because that model is text-only, image analysis is
+configured separately to use the open-weight
+`qwen/qwen3-vl-32b-instruct` model through the same OpenRouter key; see
+[terraform/README.md](./terraform/README.md#variables) to change either model.
 
 Hermes owns the agent loop and local tool execution. It advertises its native
 tool schemas to OpenRouter, parses the returned tool calls, invokes the tools

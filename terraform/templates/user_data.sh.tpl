@@ -163,6 +163,8 @@ runuser -l ec2-user -c "HERMES_HOME='$HERMES_HOME' curl -fsSL https://raw.github
 HERMES_BIN=/home/ec2-user/.local/bin/hermes
 runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set model.provider openrouter"
 runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set model.default '${openrouter_model}'"
+runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set auxiliary.vision.provider openrouter"
+runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set auxiliary.vision.model '${vision_openrouter_model}'"
 runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set tts.provider edge"
 runuser -l ec2-user -c "HOME=/home/ec2-user HERMES_HOME='$HERMES_HOME' '$HERMES_BIN' config set tts.edge.voice en-GB-SoniaNeural"
 

@@ -331,6 +331,7 @@ resource "aws_launch_template" "agent" {
     openrouter_key_param_name = aws_ssm_parameter.openrouter_key.name
     telegram_token_param_name = aws_ssm_parameter.telegram_bot_token.name
     openrouter_model          = var.openrouter_model
+    vision_openrouter_model   = var.vision_openrouter_model
     project_name              = var.project_name
     memory_volume_id          = aws_ebs_volume.memory.id
   }))
@@ -366,6 +367,19 @@ resource "aws_autoscaling_group" "agent" {
   launch_template {
     id      = aws_launch_template.agent.id
     version = "$Latest"
+  }
+
+  # A launch-template change (including rendered user_data) must be exercised by
+  # a fresh instance to take effect. With one instance and a single-AZ EBS memory
+  # volume, the old node has to stop before its replacement can attach that volume,
+  # so this deliberately permits a short maintenance window during a refresh.
+  instance_refresh {
+    strategy = "Rolling"
+
+    preferences {
+      min_healthy_percentage = 0
+      instance_warmup        = 300
+    }
   }
 
   dynamic "tag" {

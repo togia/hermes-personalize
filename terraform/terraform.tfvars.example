@@ -3,6 +3,11 @@
 key_name           = "your-ec2-keypair-name"
 budget_alert_email = "you@example.com"
 
+# Optional model overrides. The defaults keep DeepSeek V4 Pro for chat and use
+# Qwen3 VL 32B Instruct for image analysis through the same OpenRouter key.
+# openrouter_model        = "deepseek/deepseek-v4-pro"
+# vision_openrouter_model = "qwen/qwen3-vl-32b-instruct"
+
 # Do NOT put these three here — pass them at apply time instead:
 #   TF_VAR_openrouter_api_key="sk-or-..." \
 #   TF_VAR_telegram_bot_token="123456:ABC-your-botfather-token" \

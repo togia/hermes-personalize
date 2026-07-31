@@ -3,7 +3,8 @@
 ## What this is (and isn't)
 
 You're running the official **NousResearch Hermes Agent CLI** on EC2 and consuming
-**DeepSeek V4 Pro** through OpenRouter — you are not hosting model weights yourself.
+**DeepSeek V4 Pro** for chat/tool calling plus **Qwen3 VL 32B Instruct** for image
+analysis through OpenRouter — you are not hosting model weights yourself.
 The instance does not need a GPU, but it does need enough memory for Hermes' Node.js
 and Python runtime, gateway, skills, and local tool execution. It runs:
 
@@ -77,7 +78,7 @@ See `docs/infra.drawio` for the visual version of this.
 | Security Group | **No ingress rules at all.** Outbound: 443 (OpenRouter, Telegram, Tailscale coordination, SSM), 53/UDP (DNS), 41641/UDP (Tailscale direct connections, optional). | Nothing external can open a new connection to this instance, full stop. Admin access and messaging both ride on connections the instance itself initiates outbound (see Tailscale and Telegram rows), so there's nothing to open inbound and no load balancer, API Gateway, or NAT Gateway needed to front it. |
 | Remote admin access | **Tailscale**, installed via `user_data` on first boot, joins the instance to your private tailnet using an auth key from SSM. You SSH to the instance's stable Tailscale IP instead of its (changing) public IP. | Solves both the "my IP changes when I travel" problem (no more editing a CIDR variable and re-applying Terraform every time you're on a new network) and the "don't expose SSH to the internet" problem, at the same time, for free. Tailscale's own ACLs (configured in the Tailscale admin console, not in this Terraform) should restrict which of your devices can reach this node. |
 | Admin access fallback | **AWS Systems Manager Session Manager** (`aws ssm start-session`), IAM-only, no inbound rule | Covers the case where `user_data`'s Tailscale join never comes up (bad auth key, transient failure, etc.). It's a second path in, but not a second inbound rule — Session Manager uses an AWS-managed outbound channel, same "no ingress" property as Tailscale, just independent of whether Tailscale itself is healthy. |
-| Messaging and tools | **Hermes Telegram gateway** with native OpenRouter tool calling | Hermes sends tool schemas to OpenRouter, receives model-selected tool calls, executes them on the instance, and sends results back to the model. Telegram long polling remains outbound-only, avoiding a public HTTP endpoint. Microsoft Edge TTS uses `en-GB-SoniaNeural`, is transcoded to Ogg/Opus, and Hermes sends it through Telegram's native `sendVoice` voice-note route; `sendAudio` remains for MP3/M4A attachments. |
+| Messaging and tools | **Hermes Telegram gateway** with native OpenRouter tool calling and vision routing | Hermes sends tool schemas to DeepSeek V4 Pro through OpenRouter, receives model-selected tool calls, executes them on the instance, and sends results back to the model. Image analysis is routed separately through OpenRouter to Qwen3 VL 32B Instruct. Telegram long polling remains outbound-only, avoiding a public HTTP endpoint. Microsoft Edge TTS uses `en-GB-SoniaNeural`, is transcoded to Ogg/Opus, and Hermes sends it through Telegram's native `sendVoice` voice-note route; `sendAudio` remains for MP3/M4A attachments. |
 
 ## Cost estimate (us-east-1, on-demand, approximate)
 

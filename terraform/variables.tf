@@ -79,6 +79,12 @@ variable "openrouter_model" {
   default     = "deepseek/deepseek-v4-pro"
 }
 
+variable "vision_openrouter_model" {
+  description = "OpenRouter model slug Hermes uses only for image analysis. This must be a multimodal model; Qwen3 VL 32B Instruct is an open-weight vision model and keeps the text-only DeepSeek V4 Pro chat model unchanged."
+  type        = string
+  default     = "qwen/qwen3-vl-32b-instruct"
+}
+
 # Same reasoning as the other three secrets above: never in tfvars or version control.
 
 variable "budget_limit_usd" {

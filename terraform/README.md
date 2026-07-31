@@ -70,7 +70,8 @@ values and resource references flow between them:
 | `root_volume_size_gb` | No (default `20`) | OS root volume for Amazon Linux and the Hermes runtime; persistent Hermes state remains on the separate memory volume. |
 | `data_volume_size_gb` | No (default `20`) | Size of the separate EBS volume that holds long-term agent memory. |
 | `snapshot_retention_days` | No (default `14`) | How many daily snapshots of the memory volume to retain. |
-| `openrouter_model` | No (default `deepseek/deepseek-v4-pro`) | OpenRouter model slug used by the official Hermes Agent CLI. Hermes uses OpenRouter's native tool-calling protocol with this model, then executes the returned calls on the instance. Check [openrouter.ai/models](https://openrouter.ai/models) for the current catalog, context length, pricing, and tool support before changing this. Changing it updates `user_data`, which only affects instances launched *after* the next `apply` (see the note on `templatefile()` changes and instance replacement above), not the currently running one. |
+| `openrouter_model` | No (default `deepseek/deepseek-v4-pro`) | OpenRouter model slug used by the official Hermes Agent CLI for chat and native tool calling. |
+| `vision_openrouter_model` | No (default `qwen/qwen3-vl-32b-instruct`) | OpenRouter multimodal model used only by Hermes's `vision_analyze` tool. This keeps the text-only chat model separate from image analysis. |
 | `budget_limit_usd` | No (default `25`) | Monthly AWS Budget alert threshold in USD, above expected always-on infrastructure cost (excluding OpenRouter usage). |
 | `enable_cloudwatch_logs` | No (default `true`) | Whether to create a CloudWatch Logs group for the agent process. |
 
@@ -104,26 +105,16 @@ values and resource references flow between them:
 
 `terraform.tfvars`, `*.tfstate`, and `.terraform/` are gitignored — never commit them.
 
-### Changing the agent script or `openrouter_model`
+### Changing the agent script or model configuration
 
 `aws_launch_template.agent` reads `templates/user_data.sh.tpl` via `templatefile()`.
-Editing that script, or any variable it depends on (`openrouter_model`,
-`instance_type`, etc.), and running `terraform apply` creates a **new launch
-template version** — but doesn't touch the currently running instance.
-EC2 only reads `user_data` at boot, and Terraform doesn't force a running
-instance to reboot or get replaced just because the launch template it came
-from changed underneath it. Two ways to actually pick up the change:
-
-- **Wait for the next natural replacement** (ASG health-check failure, manual
-  termination) — it'll launch from the new version automatically.
-- **Force it now**: terminate the instance yourself
-  (`aws ec2 terminate-instances --instance-ids <id> --region <region>`) and let
-  the self-healing ASG (min=max=desired=1) relaunch it, or run
-  `aws autoscaling start-instance-refresh --auto-scaling-group-name <project_name>-asg --region <region>`
-  for a more controlled rollout.
-
-Either way, the memory volume and everything on it survives — only the
-instance (and its OS disk) gets replaced.
+Editing that script, or a variable it depends on (`openrouter_model`,
+`vision_openrouter_model`, `instance_type`, etc.), and running `terraform apply`
+creates a new launch-template version. The ASG's Terraform-managed instance
+refresh then replaces its one instance so the change takes effect; expect a
+short maintenance window while the existing node releases the single-AZ memory
+volume and its replacement boots. The memory volume and everything on it
+survives — only the instance and its OS disk are replaced.
 
 ### If Terraform prompts you for a value interactively
 
